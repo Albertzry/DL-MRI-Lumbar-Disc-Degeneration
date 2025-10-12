@@ -120,6 +120,71 @@ def get_patient_identifiers_from_cropped_files(folder):
     return [i.split("/")[-1][:-4] for i in subfiles(folder, join=True, suffix=".npz")]
 
 
+# 新增：中心裁剪到指定空间尺寸（默认把所有体积中心裁剪到 [Z,Y,X] = (85,256,216) -> 对应你的 [216,256,85] 原始表示为 [X,Y,Z]）
+def center_crop_to_size(data, seg=None, target_size=(85, 256, 216), nonzero_label=-1):
+    """
+    Center-crop (并在必要时 pad) 输入到指定的空间尺寸。
+    data: numpy array with shape (C, Z, Y, X)
+    target_size: tuple (tz, ty, tx) 对应 (Z, Y, X)
+    返回 (data, seg, bbox) ，bbox 按文件中既有格式 [[zmin,zmax],[xmin,xmax],[ymin,ymax]]
+    """
+    assert len(data.shape) == 4, "data must have shape (C, Z, Y, X)"
+    C, Z, Y, X = data.shape
+    tz, ty, tx = map(int, target_size)
+
+    # 计算目标在原图上的起止（可能超出边界）
+    z0 = (Z - tz) // 2
+    y0 = (Y - ty) // 2
+    x0 = (X - tx) // 2
+    z1 = z0 + tz
+    y1 = y0 + ty
+    x1 = x0 + tx
+
+    # 限制在图像范围内得到实际裁剪区间
+    z0c, z1c = max(0, z0), min(Z, z1)
+    y0c, y1c = max(0, y0), min(Y, y1)
+    x0c, x1c = max(0, x0), min(X, x1)
+
+    # bbox 格式与文件中保持一致：[[zmin,zmax],[xmin,xmax],[ymin,ymax]]
+    bbox = [[int(z0c), int(z1c)], [int(y0c), int(y1c)], [int(x0c), int(x1c)]]
+
+    # 裁剪（先按有效区间）
+    cropped = data[:, z0c:z1c, y0c:y1c, x0c:x1c]
+    if seg is not None:
+        cropped_seg = seg[:, z0c:z1c, y0c:y1c, x0c:x1c]
+    else:
+        cropped_seg = None
+
+    # 计算需要的 padding（当目标大于原图或裁剪区不足时）
+    pad_z_before = max(0, -z0)
+    pad_y_before = max(0, -y0)
+    pad_x_before = max(0, -x0)
+    pad_z_after = max(0, z1 - Z)
+    pad_y_after = max(0, y1 - Y)
+    pad_x_after = max(0, x1 - X)
+
+    if any([pad_z_before, pad_z_after, pad_y_before, pad_y_after, pad_x_before, pad_x_after]):
+        pad_width = [
+            (0, 0),  # channel axis
+            (pad_z_before, pad_z_after),
+            (pad_y_before, pad_y_after),
+            (pad_x_before, pad_x_after)
+        ]
+        cropped = np.pad(cropped, pad_width, mode='constant', constant_values=0)
+        if cropped_seg is not None:
+            cropped_seg = np.pad(cropped_seg, pad_width, mode='constant', constant_values=nonzero_label)
+
+    # 如果没有提供 seg，依据裁剪后 data 生成 seg 掩码（非零体素置 0，空白置 nonzero_label），维度为 (1, tz, ty, tx)
+    if cropped_seg is None:
+        nz = np.any(cropped != 0, axis=0).astype(int)  # shape (tz,ty,tx)
+        nz_mask = np.zeros_like(nz, dtype=int)
+        nz_mask[nz == 0] = nonzero_label
+        nz_mask[nz > 0] = 0
+        cropped_seg = nz_mask[None]
+
+    return cropped, cropped_seg, bbox
+
+
 class ImageCropper(object):
     def __init__(self, num_threads, output_folder=None):
         """
@@ -138,7 +203,9 @@ class ImageCropper(object):
     @staticmethod
     def crop(data, properties, seg=None):
         shape_before = data.shape
-        data, seg, bbox = crop_to_nonzero(data, seg, nonzero_label=-1)
+        # 使用中心裁剪到固定大小：原始空间 [X,Y,Z]=[512,512,85] -> 目标 [216,256,85]
+        # 在此文件中数据的空间顺序为 (Z, Y, X)，因此传入 (tz, ty, tx) = (85, 256, 216)
+        data, seg, bbox = center_crop_to_size(data, seg, target_size=(96, 256, 224), nonzero_label=-1)
         shape_after = data.shape
         print("before crop:", shape_before, "after crop:", shape_after, "spacing:",
               np.array(properties["original_spacing"]), "\n")
@@ -214,3 +281,4 @@ class ImageCropper(object):
     def save_properties(self, case_identifier, properties):
         with open(os.path.join(self.output_folder, "%s.pkl" % case_identifier), 'wb') as f:
             pickle.dump(properties, f)
+# ...existing code...
