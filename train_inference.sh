@@ -25,7 +25,7 @@ if ${predict}
 then
 
 
-	cd /root/DL-MRI-Lumbar-Disc-Degeneration #/DATASET/nnFormer_raw/nnFormer_raw_data/Task001_disc/
+	cd /root/DL-MRI-Lumbar-Disc-Degeneration/DATASET/nnFormer_raw/nnFormer_raw_data/Task001_disc/
 	CUDA_VISIBLE_DEVICES=${cuda} nnFormer_predict -i imagesTs -o inferTs/${name} -m 3d_fullres -t ${task} -f 0 -chk model_best -tr nnFormerTrainerV2_${name}
 	python inference_disc.py ${name}
 fi
