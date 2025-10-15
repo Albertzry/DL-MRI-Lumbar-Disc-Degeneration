@@ -360,6 +360,22 @@ class nnFormerTrainer(NetworkTrainer):
         else:
             self.net_conv_kernel_sizes = stage_plans['conv_kernel_sizes']
 
+        # Verify that patch_size is compatible with pooling operations. Each axis of patch_size should be
+        # divisible by the product of pooling kernel sizes along that axis. If not, up/down sampling may lead to
+        # mismatched spatial sizes and cause runtime errors during skip-concat in the network.
+        try:
+            pool_array = np.vstack(self.net_num_pool_op_kernel_sizes)
+            pooling_factors = np.prod(pool_array, axis=0)
+            incompatible = [i for i in range(len(pooling_factors)) if int(self.patch_size[i]) % int(pooling_factors[i]) != 0]
+            if len(incompatible) > 0:
+                raise RuntimeError("patch_size %s is incompatible with pooling factors %s. "
+                                   "Make patch dimensions divisible by the respective products of pool sizes "
+                                   "or change the pooling configuration. Incompatible axes: %s" % (
+                                       str(self.patch_size), str(pooling_factors.tolist()), str(incompatible)))
+        except Exception as e:
+            # If something unexpected happens here (e.g. shapes), just propagate a helpful message
+            raise
+
         self.pad_all_sides = None  # self.patch_size
         self.intensity_properties = plans['dataset_properties']['intensityproperties']
         self.normalization_schemes = plans['normalization_schemes']
