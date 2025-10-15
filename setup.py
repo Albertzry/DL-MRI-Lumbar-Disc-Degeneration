@@ -37,6 +37,7 @@ setup(name='nnformer',
               'nnFormer_change_trainer_class = nnformer.inference.change_trainer:main',
               'nnFormer_evaluate_folder = nnformer.evaluation.evaluator:nnFormer_evaluate_folder',
               'nnFormer_plot_task_pngs = nnformer.utilities.overlay_plots:entry_point_generate_overlay',
+              'nnFormer_export_npz2nii = nnformer.inference.segmentation_export:main',
           ],
       },
       

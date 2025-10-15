@@ -231,3 +231,58 @@ def save_segmentation_nifti(segmentation, out_fname, dct, order=1, force_separat
     sitk.WriteImage(seg_resized_itk, out_fname)
 
     sys.stdout = sys.__stdout__
+
+def export_npz_folder_to_nii(folder_with_npz: str, output_folder: str,
+                             plans_identifier: str = "nnFormerPlansv2.1",
+                             task_name: str = "Task001_disc"):
+    """
+    将 nnFormer_predict 生成的整文件夹 .npz + .pkl 批量转为 .nii.gz 标签图
+    """
+    from batchgenerators.utilities.file_and_folder_operations import subfiles, load_pickle, maybe_mkdir_p
+    import os
+    import numpy as np
+
+    maybe_mkdir_p(output_folder)
+    npz_files = subfiles(folder_with_npz, suffix=".npz", join=False)
+    if not npz_files:
+        print("目录内未找到 .npz 文件，提前退出"); return
+
+    for npz in npz_files:
+        base_name = npz[:-4]                      # 去掉 .npz
+        pkl_file  = os.path.join(folder_with_npz, base_name + ".pkl")
+        if not os.path.isfile(pkl_file):
+            print(f"跳过 {npz}（缺少对应 .pkl）"); continue
+
+        # 加载 softmax
+        softmax_data = np.load(os.path.join(folder_with_npz, npz))['softmax']
+        properties   = load_pickle(pkl_file)
+        out_nii      = os.path.join(output_folder, base_name + ".nii.gz")
+
+        save_segmentation_nifti_from_softmax(
+            segmentation_softmax=softmax_data,   # 传 ndarray
+            out_fname=out_nii,
+            properties_dict=properties,
+            order=1,
+            region_class_order=None,
+            verbose=False)
+        print("converted ->", out_nii)
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser("Convert folder of .npz softmax to .nii.gz segmentations")
+    parser.add_argument('-i', '--folder_with_npz', required=True,
+                        help="folder containing *.npz and *.pkl from nnFormer_predict")
+    parser.add_argument('-o', '--output_folder', required=True,
+                        help="where to save the resulting .nii.gz files")
+    parser.add_argument('-pl', '--plans_identifier', default='nnFormerPlansv2.1',
+                        help="plans identifier (default: nnFormerPlansv2.1)")
+    parser.add_argument('-t', '--task_name', default='Task001_disc',
+                        help="task name (default: Task001_disc)")
+    args = parser.parse_args()
+    export_npz_folder_to_nii(args.folder_with_npz, args.output_folder,
+                             args.plans_identifier, args.task_name)
+    print("== 全部转换完成 ==")
+
+
+if __name__ == "__main__":
+    main()
