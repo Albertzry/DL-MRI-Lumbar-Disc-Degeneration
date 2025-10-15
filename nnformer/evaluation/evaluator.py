@@ -461,7 +461,7 @@ def evaluate_folder(folder_with_gts: str, folder_with_predictions: str, labels: 
     return res
 
 
-def nnformer_evaluate_folder():
+def nnFormer_evaluate_folder():
     import argparse
     parser = argparse.ArgumentParser("Evaluates the segmentations located in the folder pred. Output of this script is "
                                      "a json file. At the very bottom of the json file is going to be a 'mean' "
