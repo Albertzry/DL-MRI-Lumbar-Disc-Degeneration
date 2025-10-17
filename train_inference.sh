@@ -18,17 +18,17 @@ if ${train}
 then
 	
 	cd /root/DL-MRI-Lumbar-Disc-Degeneration/nnformer
-	CUDA_VISIBLE_DEVICES=${cuda} nnFormer_train 3d_fullres nnFormerTrainerV2 ${task} 0
+	CUDA_VISIBLE_DEVICES=${cuda} nnFormer_train 3d_fullres nnFormerTrainerV2_nnformer_disc ${task} 0
 fi
 
-if ${predict}
-then
+# if ${predict}
+# then
 
 
-	cd /root/DL-MRI-Lumbar-Disc-Degeneration/DATASET/nnFormer_raw/nnFormer_raw_data/Task001_disc/
-	CUDA_VISIBLE_DEVICES=${cuda} nnFormer_predict -i imagesTs -o inferTs/${name} -m 3d_fullres -t ${task} -f 0 -chk model_best -tr nnFormerTrainerV2_${name}
-	python inference_disc.py ${name}
-fi
+# 	cd /root/DL-MRI-Lumbar-Disc-Degeneration/DATASET/nnFormer_raw/nnFormer_raw_data/Task001_disc/
+# 	CUDA_VISIBLE_DEVICES=${cuda} nnFormer_predict -i imagesTs -o inferTs/${name} -m 3d_fullres -t ${task} -f 0 -chk model_best -tr nnFormerTrainerV2_${name}
+# 	python inference_disc.py ${name}
+# fi
 
 
 
