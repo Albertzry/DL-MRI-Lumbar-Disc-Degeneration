@@ -60,6 +60,7 @@ def get_default_configuration(network, task, network_trainer, plans_identifier=d
     if task=='Task001_disc':
         plans['plans_per_stage'][Stage]['batch_size']=2
         plans['plans_per_stage'][Stage]['patch_size']=np.array([96,160,160])
+        plans['plans_per_stage'][Stage]['pool_op_kernel_sizes']=[[1,4,4], [1,2,2], [2,2,2], [2,2,2]]
         pickle_file = open(plans_file,'wb')
         pickle.dump(plans, pickle_file)
         pickle_file.close()

@@ -21,6 +21,8 @@ import shutil
 from batchgenerators.utilities.file_and_folder_operations import *
 from multiprocessing import Pool
 from collections import OrderedDict
+import torch
+import torch.nn.functional as F
 
 # 预处理统一到固定体素网格后再做中心裁剪
 RESAMPLE_TARGET_SIZE = (512, 512, 85)  # ITK 顺序 (X, Y, Z)
@@ -56,14 +58,14 @@ def crop_to_bbox(image, bbox):
 
 
 def resample_sitk_image_to_size(itk_image, target_size, is_seg=False):
-    """利用 SimpleITK 将影像重采样到目标大小。"""
+    """保留：使用 SimpleITK 重采样（未使用）。保留以兼容旧流程。"""
     target_size = tuple(int(i) for i in target_size)
     original_size = itk_image.GetSize()
     original_spacing = itk_image.GetSpacing()
     target_spacing = tuple(
         original_spacing[i] * (original_size[i] / float(target_size[i])) for i in range(len(target_size))
     )
-    interpolator = sitk.sitkNearestNeighbor if is_seg else sitk.sitkLinear
+    interpolator = sitk.sitkLinear
     return sitk.Resample(
         itk_image,
         target_size,
@@ -75,6 +77,24 @@ def resample_sitk_image_to_size(itk_image, target_size, is_seg=False):
         0,
         itk_image.GetPixelID(),
     )
+
+
+def _torch_interpolate_3d(arr_czyx, target_size_xyz):
+    """使用 PyTorch 对 3D 体数据做三线性插值。
+
+    入参:
+    - arr_czyx: numpy 数组，形状 (C, Z, Y, X)
+    - target_size_xyz: 目标体素数，顺序 (X, Y, Z)
+
+    返回:
+    - 同 dtype 的 numpy 数组，形状 (C, Z, Y, X)
+    """
+    assert arr_czyx.ndim == 4, "expected (C, Z, Y, X)"
+    tx, ty, tz = [int(i) for i in target_size_xyz]
+    # torch 需要 (N, C, D, H, W)，size=(D, H, W)=(Z, Y, X)
+    t = torch.from_numpy(arr_czyx).unsqueeze(0).float()
+    out = F.interpolate(t, size=(tz, ty, tx), mode="trilinear", align_corners=False)
+    return out.squeeze(0).cpu().numpy()
 
 
 def center_crop_to_size(data, seg=None, target_size=CENTER_CROP_SIZE, nonzero_label=-1):
@@ -144,7 +164,8 @@ def get_case_identifier_from_npz(case):
 
 
 def load_case_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE_TARGET_SIZE):
-    """读取一例病例，按需重采样到统一体素网格。"""
+    """读取一例病例，使用 PyTorch 对图像与标签做 3D 三线性插值到统一体素网格，
+    并将标签在插值后映射回离散集合 {0,1,2}。"""
     assert isinstance(data_files, (list, tuple)), "case must be either a list or a tuple"
     properties = OrderedDict()
     data_itk = [sitk.ReadImage(f) for f in data_files]
@@ -159,21 +180,38 @@ def load_case_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE
     properties["itk_spacing"] = data_itk[0].GetSpacing()
     properties["itk_direction"] = data_itk[0].GetDirection()
 
+    # 先转为 numpy (Z, Y, X)，再堆成 (C, Z, Y, X)
+    data_npy = np.vstack([sitk.GetArrayFromImage(d)[None] for d in data_itk]).astype(np.float32)
+    seg_arr = sitk.GetArrayFromImage(seg_itk) if seg_itk is not None else None
+
     if target_size is not None:
-        data_itk = [resample_sitk_image_to_size(d, target_size, is_seg=False) for d in data_itk]
-        if seg_itk is not None:
-            seg_itk = resample_sitk_image_to_size(seg_itk, target_size, is_seg=True)
-        properties["size_after_resample"] = np.array(target_size)[[2, 1, 0]]
-        properties["spacing_after_resample"] = np.array(data_itk[0].GetSpacing())[[2, 1, 0]]
+        # 使用 PyTorch 做三线性插值，输出数组 (C, Z, Y, X)
+        data_npy = _torch_interpolate_3d(data_npy, target_size).astype(np.float32)
+        if seg_arr is not None:
+            seg_float = seg_arr.astype(np.float32, copy=False)
+            seg_res = _torch_interpolate_3d(seg_float[None], target_size)[0]
+            # 离散化回 {0,1,2}
+            seg_res = np.rint(seg_res)
+            seg_res = np.clip(seg_res, 0, 2).astype(np.int16, copy=False)
+            seg_npy = seg_res[None].astype(np.float32)
+        else:
+            seg_npy = None
+
+        # 计算 spacing_after_resample（基于原 spacing/size 推导）
+        orig_size_xyz = np.array(data_itk[0].GetSize())  # (X, Y, Z)
+        orig_spacing_xyz = np.array(data_itk[0].GetSpacing())  # (X, Y, Z)
+        tgt_size_xyz = np.array([int(i) for i in target_size])
+        tgt_spacing_xyz = orig_spacing_xyz * (orig_size_xyz / tgt_size_xyz.astype(np.float32))
+        properties["size_after_resample"] = tgt_size_xyz[[2, 1, 0]]  # (Z, Y, X)
+        properties["spacing_after_resample"] = tgt_spacing_xyz[[2, 1, 0]]  # (Z, Y, X)
     else:
+        # 不重采样
+        if seg_arr is not None:
+            seg_npy = seg_arr[None].astype(np.float32)
+        else:
+            seg_npy = None
         properties["size_after_resample"] = properties["original_size_of_raw_data"]
         properties["spacing_after_resample"] = properties["original_spacing"]
-
-    data_npy = np.vstack([sitk.GetArrayFromImage(d)[None] for d in data_itk]).astype(np.float32)
-    if seg_itk is not None:
-        seg_npy = sitk.GetArrayFromImage(seg_itk)[None].astype(np.float32)
-    else:
-        seg_npy = None
     return data_npy, seg_npy, properties
 
 

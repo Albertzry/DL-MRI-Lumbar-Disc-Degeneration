@@ -16,4 +16,5 @@ python3 -m nnformer.inference.predict_simple \
   -tr nnFormerTrainerV2
 
 #test
+ln -s /root/DL-MRI-Lumbar-Disc-Degeneration/DATASET/nnFormer_raw/nnFormer_raw_data/Task01_disc/labelsTs ./labelsTs
 python3 nnformer/interence_disc.py nnformer_pred --threshold 0.5
