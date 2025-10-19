@@ -23,10 +23,33 @@ from multiprocessing import Pool
 from collections import OrderedDict
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import rotate as ndi_rotate, gaussian_filter as ndi_gaussian_filter, zoom as ndi_zoom
 
 # 预处理统一到固定体素网格后再做中心裁剪
 RESAMPLE_TARGET_SIZE = (512, 512, 85)  # ITK 顺序 (X, Y, Z)
 CENTER_CROP_SIZE = (85, 256, 216)      # numpy 顺序 (Z, X, Y) -> 物理尺寸 [216, 256, 85]
+
+# 在重采样后启用数据增强
+AUGMENT_AT_RESAMPLE = True
+
+# 增强超参数（概率与强度范围）
+AUG_CFG = {
+    "p_rotate": 0.5,
+    "max_rotate_deg": 10.0,  # 每个轴的最大旋转角度
+    "p_flip": 0.5,           # 针对每个轴独立判定是否翻转
+    "p_gamma": 0.3,
+    "gamma_range": (0.7, 1.5),
+    "p_brightness_contrast": 0.3,
+    "contrast_range": (0.9, 1.1),
+    "brightness_std_rel": 0.1,  # 亮度偏移的相对标准差（相对每通道 std）
+    "p_noise": 0.3,
+    "noise_std_rel": (0.01, 0.05),
+    "p_blur": 0.3,
+    "blur_sigma_range": (0.5, 1.2),  # 以体素为单位
+    "p_lowres": 0.3,
+    "lowres_factor_range": (0.5, 0.8),  # 缩小因子，随后再放回原尺寸
+    "seed": None,
+}
 
 
 def create_nonzero_mask(data):
@@ -97,6 +120,138 @@ def _torch_interpolate_3d(arr_czyx, target_size_xyz):
     return out.squeeze(0).cpu().numpy()
 
 
+def _rand(rng, low, high):
+    return float(rng.uniform(low, high))
+
+
+def _maybe(p, rng):
+    return rng.random() < p
+
+
+def _apply_intensity_ops(data_czyx, rng, cfg):
+    """仅对图像执行强度类增强，保持形状不变。
+    data_czyx: (C, Z, Y, X) float32
+    返回：增强后的 data_czyx
+    """
+    C = data_czyx.shape[0]
+    out = data_czyx.copy()
+
+    # Gamma 校正（对每通道单独归一化到 0-1 再做 gamma）
+    if _maybe(cfg["p_gamma"], rng):
+        gamma = _rand(rng, *cfg["gamma_range"])
+        eps = 1e-8
+        for c in range(C):
+            ch = out[c]
+            vmin, vmax = float(ch.min()), float(ch.max())
+            if vmax - vmin > eps:
+                ch_norm = (ch - vmin) / (vmax - vmin + eps)
+                ch_aug = np.power(ch_norm, gamma)
+                out[c] = ch_aug * (vmax - vmin) + vmin
+
+    # 亮度/对比度
+    if _maybe(cfg["p_brightness_contrast"], rng):
+        alpha = _rand(rng, *cfg["contrast_range"])  # 对比度
+        for c in range(C):
+            ch = out[c]
+            std = float(ch.std())
+            beta = rng.normal(0.0, cfg["brightness_std_rel"] * (std + 1e-8))  # 亮度偏移
+            out[c] = ch * alpha + beta
+
+    # 高斯噪声
+    if _maybe(cfg["p_noise"], rng):
+        std_low, std_high = cfg["noise_std_rel"]
+        for c in range(C):
+            ch = out[c]
+            ch_std = float(ch.std())
+            noise_std = _rand(rng, std_low, std_high) * (ch_std + 1e-8)
+            out[c] = ch + rng.normal(0.0, noise_std, size=ch.shape).astype(np.float32)
+
+    # 模糊（3D 高斯滤波）
+    if _maybe(cfg["p_blur"], rng):
+        sigma = _rand(rng, *cfg["blur_sigma_range"])  # 各向同性
+        for c in range(C):
+            out[c] = ndi_gaussian_filter(out[c], sigma=sigma)
+
+    # 低分辨率模拟：下采样再上采样回原尺寸
+    if _maybe(cfg["p_lowres"], rng):
+        factor = _rand(rng, *cfg["lowres_factor_range"])  # 0.5~0.8
+        _, Z, Y, X = out.shape
+        new_Z = max(1, int(round(Z * factor)))
+        new_Y = max(1, int(round(Y * factor)))
+        new_X = max(1, int(round(X * factor)))
+        for c in range(C):
+            low = ndi_zoom(out[c], (new_Z / Z, new_Y / Y, new_X / X), order=1)
+            out[c] = ndi_zoom(low, (Z / low.shape[0], Y / low.shape[1], X / low.shape[2]), order=1)
+
+    return out
+
+
+def _apply_geometric_ops(data_czyx, seg_zyx, rng, cfg):
+    """几何增强：作用于图像与标签。保持输出形状不变。
+    data_czyx: (C, Z, Y, X)
+    seg_zyx: (Z, Y, X) 或 None
+    返回：data_czyx_aug, seg_zyx_aug
+    """
+    C, Z, Y, X = data_czyx.shape
+    d_out = data_czyx.copy()
+    s_out = None if seg_zyx is None else seg_zyx.copy()
+
+    # 随机翻转（每轴独立判定）
+    if _maybe(cfg["p_flip"], rng):
+        if _maybe(0.5, rng):  # Z 轴
+            d_out = d_out[:, ::-1, :, :]
+            if s_out is not None:
+                s_out = s_out[::-1, :, :]
+        if _maybe(0.5, rng):  # Y 轴
+            d_out = d_out[:, :, ::-1, :]
+            if s_out is not None:
+                s_out = s_out[:, ::-1, :]
+        if _maybe(0.5, rng):  # X 轴
+            d_out = d_out[:, :, :, ::-1]
+            if s_out is not None:
+                s_out = s_out[:, :, ::-1]
+
+    # 随机小角度旋转（绕三个轴，保持形状）
+    if _maybe(cfg["p_rotate"], rng):
+        max_deg = cfg["max_rotate_deg"]
+        # 依次对三个平面旋转：
+        deg_z = _rand(rng, -max_deg, max_deg)  # 绕 Z 轴，相当于在 (Y, X) 平面旋转
+        deg_y = _rand(rng, -max_deg, max_deg)  # 绕 Y 轴 -> (Z, X)
+        deg_x = _rand(rng, -max_deg, max_deg)  # 绕 X 轴 -> (Z, Y)
+        # 对每个通道分别处理
+        for c in range(C):
+            ch = d_out[c]
+            if abs(deg_z) > 1e-3:
+                ch = ndi_rotate(ch, angle=deg_z, axes=(1, 2), reshape=False, order=1, mode='nearest')
+            if abs(deg_y) > 1e-3:
+                ch = ndi_rotate(ch, angle=deg_y, axes=(0, 2), reshape=False, order=1, mode='nearest')
+            if abs(deg_x) > 1e-3:
+                ch = ndi_rotate(ch, angle=deg_x, axes=(0, 1), reshape=False, order=1, mode='nearest')
+            d_out[c] = ch
+        if s_out is not None:
+            s = s_out
+            if abs(deg_z) > 1e-3:
+                s = ndi_rotate(s, angle=deg_z, axes=(1, 2), reshape=False, order=0, mode='nearest')
+            if abs(deg_y) > 1e-3:
+                s = ndi_rotate(s, angle=deg_y, axes=(0, 2), reshape=False, order=0, mode='nearest')
+            if abs(deg_x) > 1e-3:
+                s = ndi_rotate(s, angle=deg_x, axes=(0, 1), reshape=False, order=0, mode='nearest')
+            s_out = s.astype(np.int16, copy=False)
+
+    return d_out, s_out
+
+
+def apply_augmentations(data_czyx, seg_zyx=None, cfg=AUG_CFG):
+    """在重采样后应用增强。几何增强同步作用到 seg，强度增强仅作用于 data。
+    返回：data_aug, seg_aug
+    """
+    rng = np.random.default_rng(cfg.get("seed", None))
+    # 先几何，再强度（强度需在最终对齐后的图像上进行）
+    data_geo, seg_geo = _apply_geometric_ops(data_czyx, seg_zyx, rng, cfg)
+    data_out = _apply_intensity_ops(data_geo, rng, cfg)
+    return data_out, seg_geo
+
+
 def center_crop_to_size(data, seg=None, target_size=CENTER_CROP_SIZE, nonzero_label=-1):
     """按中心裁剪/填充到目标尺寸，保持图像与标签对齐。"""
     assert len(data.shape) == 4, "data must have shape (C, Z, X, Y)"
@@ -163,7 +318,7 @@ def get_case_identifier_from_npz(case):
     return case_identifier
 
 
-def load_case_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE_TARGET_SIZE):
+def load_case_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE_TARGET_SIZE, apply_aug=AUGMENT_AT_RESAMPLE):
     """读取一例病例，使用 PyTorch 对图像与标签做 3D 三线性插值到统一体素网格，
     并将标签在插值后映射回离散集合 {0,1,2}。"""
     assert isinstance(data_files, (list, tuple)), "case must be either a list or a tuple"
@@ -212,6 +367,17 @@ def load_case_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE
             seg_npy = None
         properties["size_after_resample"] = properties["original_size_of_raw_data"]
         properties["spacing_after_resample"] = properties["original_spacing"]
+
+    # 在重采样完成后应用数据增强
+    if apply_aug:
+        seg_zyx = None if seg_npy is None else seg_npy[0].astype(np.int16)
+        data_npy, seg_aug = apply_augmentations(data_npy, seg_zyx, AUG_CFG)
+        if seg_aug is not None:
+            # 保障标签仍为 {0,1,2} 集合
+            seg_aug = np.clip(np.rint(seg_aug), 0, 2).astype(np.int16, copy=False)
+            seg_npy = seg_aug[None].astype(np.float32)
+        else:
+            seg_npy = None
     return data_npy, seg_npy, properties
 
 

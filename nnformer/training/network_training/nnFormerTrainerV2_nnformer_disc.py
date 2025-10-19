@@ -151,7 +151,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.was_initialized = True
 
     def initialize_network(self):
-        """
+        """ 
         - momentum 0.99
         - SGD instead of Adam
         - self.lr_scheduler = None because we do poly_lr
