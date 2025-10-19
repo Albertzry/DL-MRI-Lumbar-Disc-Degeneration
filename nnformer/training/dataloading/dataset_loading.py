@@ -110,6 +110,29 @@ def load_dataset(folder, num_cases_properties_loading_threshold=1000):
     return dataset
 
 
+def _compute_class_locations_from_seg_3d(seg_zyx):
+    """根据 3D 分割图动态计算各类别的体素坐标字典。
+    seg_zyx: (X, Y, Z) 或 (Z, Y, X)? 在本数据中 case_all_data 形状为 (C, X, Y, Z)，因此 seg 为 (X, Y, Z)
+    返回: dict[label] = ndarray[n, 3]，坐标顺序与 seg_zyx 一致
+    """
+    classes = np.unique(seg_zyx)
+    cls_locs = OrderedDict()
+    for c in classes:
+        if c == 0:
+            continue
+        coords = np.vstack(np.where(seg_zyx == c)).T.astype(np.int64)
+        cls_locs[int(c)] = coords
+    return cls_locs
+
+
+def _compute_valid_slices_from_seg_2d(seg_cxy):
+    """针对 2D 情况（从 3D 体取切片训练），找出含前景的切片索引。
+    seg_cxy: (X, Y) 分割切片
+    返回: True/False 是否含前景
+    """
+    return np.any(seg_cxy > 0)
+
+
 def crop_2D_image_force_fg(img, crop_size, valid_voxels):
     """
     img must be [c, x, y]
@@ -296,37 +319,35 @@ class DataLoader3D(SlimDataLoaderBase):
                 bbox_y_lb = np.random.randint(lb_y, ub_y + 1)
                 bbox_z_lb = np.random.randint(lb_z, ub_z + 1)
             else:
-                # these values should have been precomputed
-                if 'class_locations' not in properties.keys():
-                    raise RuntimeError("Please rerun the preprocessing with the newest version of nnU-Net!")
-
-                # this saves us a np.unique. Preprocessing already did that for all cases. Neat.
-                foreground_classes = np.array(
-                    [i for i in properties['class_locations'].keys() if len(properties['class_locations'][i]) != 0])
-                foreground_classes = foreground_classes[foreground_classes > 0]
-
-                if len(foreground_classes) == 0:
-                    # this only happens if some image does not contain foreground voxels at all
-                    selected_class = None
-                    voxels_of_that_class = None
-                    print('case does not contain any foreground classes', i)
+                # 优先从前景区域采样。若 properties 含 class_locations 则沿用；否则动态从 seg 生成前景坐标。
+                voxels_of_that_class = None
+                if 'class_locations' in properties.keys():
+                    foreground_classes = np.array(
+                        [k for k, v in properties['class_locations'].items() if len(v) != 0 and int(k) > 0])
+                    if len(foreground_classes) > 0:
+                        selected_class = np.random.choice(foreground_classes)
+                        voxels_of_that_class = properties['class_locations'][int(selected_class)]
+                if voxels_of_that_class is None or len(voxels_of_that_class) == 0:
+                    # 动态计算（从整例分割中提取）
+                    seg_full = case_all_data[-1]  # (X, Y, Z)
+                    cls_locs = _compute_class_locations_from_seg_3d(seg_full)
+                    # 合并所有前景
+                    all_fg = np.concatenate([v for k, v in cls_locs.items() if len(v) > 0], axis=0) if len(cls_locs) > 0 else None
+                    if all_fg is not None and len(all_fg) > 0:
+                        selected_voxel = all_fg[np.random.choice(all_fg.shape[0])]
+                        bbox_x_lb = max(lb_x, int(selected_voxel[0]) - self.patch_size[0] // 2)
+                        bbox_y_lb = max(lb_y, int(selected_voxel[1]) - self.patch_size[1] // 2)
+                        bbox_z_lb = max(lb_z, int(selected_voxel[2]) - self.patch_size[2] // 2)
+                    else:
+                        # 无前景 -> 回退为均匀随机
+                        bbox_x_lb = np.random.randint(lb_x, ub_x + 1)
+                        bbox_y_lb = np.random.randint(lb_y, ub_y + 1)
+                        bbox_z_lb = np.random.randint(lb_z, ub_z + 1)
                 else:
-                    selected_class = np.random.choice(foreground_classes)
-
-                    voxels_of_that_class = properties['class_locations'][selected_class]
-
-                if voxels_of_that_class is not None:
                     selected_voxel = voxels_of_that_class[np.random.choice(len(voxels_of_that_class))]
-                    # selected voxel is center voxel. Subtract half the patch size to get lower bbox voxel.
-                    # Make sure it is within the bounds of lb and ub
-                    bbox_x_lb = max(lb_x, selected_voxel[0] - self.patch_size[0] // 2)
-                    bbox_y_lb = max(lb_y, selected_voxel[1] - self.patch_size[1] // 2)
-                    bbox_z_lb = max(lb_z, selected_voxel[2] - self.patch_size[2] // 2)
-                else:
-                    # If the image does not contain any foreground classes, we fall back to random cropping
-                    bbox_x_lb = np.random.randint(lb_x, ub_x + 1)
-                    bbox_y_lb = np.random.randint(lb_y, ub_y + 1)
-                    bbox_z_lb = np.random.randint(lb_z, ub_z + 1)
+                    bbox_x_lb = max(lb_x, int(selected_voxel[0]) - self.patch_size[0] // 2)
+                    bbox_y_lb = max(lb_y, int(selected_voxel[1]) - self.patch_size[1] // 2)
+                    bbox_z_lb = max(lb_z, int(selected_voxel[2]) - self.patch_size[2] // 2)
 
             bbox_x_ub = bbox_x_lb + self.patch_size[0]
             bbox_y_ub = bbox_y_lb + self.patch_size[1]
@@ -476,25 +497,28 @@ class DataLoader2D(SlimDataLoaderBase):
                 random_slice = np.random.choice(case_all_data.shape[1])
                 selected_class = None
             else:
-                # these values should have been precomputed
-                if 'class_locations' not in properties.keys():
-                    raise RuntimeError("Please rerun the preprocessing with the newest version of nnU-Net!")
-
-                foreground_classes = np.array(
-                    [i for i in properties['class_locations'].keys() if len(properties['class_locations'][i]) != 0])
-                foreground_classes = foreground_classes[foreground_classes > 0]
-                if len(foreground_classes) == 0:
-                    selected_class = None
+                selected_class = None
+                valid_slices = None
+                if 'class_locations' in properties.keys():
+                    foreground_classes = np.array(
+                        [k for k, v in properties['class_locations'].items() if len(v) != 0 and int(k) > 0])
+                    if len(foreground_classes) > 0:
+                        selected_class = np.random.choice(foreground_classes)
+                        voxels_of_that_class = properties['class_locations'][int(selected_class)]
+                        valid_slices = np.unique(voxels_of_that_class[:, 0]) if voxels_of_that_class is not None and len(voxels_of_that_class) > 0 else None
+                if valid_slices is None or len(valid_slices) == 0:
+                    # 动态计算：寻找含前景的切片集合
+                    seg_vol = case_all_data[-1]
+                    valid_slices = [s for s in range(seg_vol.shape[0]) if _compute_valid_slices_from_seg_2d(seg_vol[s])]
+                if len(valid_slices) == 0:
                     random_slice = np.random.choice(case_all_data.shape[1])
-                    print('case does not contain any foreground classes', i)
                 else:
-                    selected_class = np.random.choice(foreground_classes)
-
-                    voxels_of_that_class = properties['class_locations'][selected_class]
-                    valid_slices = np.unique(voxels_of_that_class[:, 0])
                     random_slice = np.random.choice(valid_slices)
-                    voxels_of_that_class = voxels_of_that_class[voxels_of_that_class[:, 0] == random_slice]
-                    voxels_of_that_class = voxels_of_that_class[:, 1:]
+                    # 如果使用了 properties 的 class_locations，则将其限制到该切片以便下游 bbox 计算
+                    if 'class_locations' in properties.keys() and selected_class is not None:
+                        voxels_of_that_class = properties['class_locations'][int(selected_class)]
+                        voxels_of_that_class = voxels_of_that_class[voxels_of_that_class[:, 0] == random_slice]
+                        voxels_of_that_class = voxels_of_that_class[:, 1:] if voxels_of_that_class.size > 0 else voxels_of_that_class
 
             # now crop case_all_data to contain just the slice of interest. If we want additional slice above and
             # below the current slice, here is where we get them. We stack those as additional color channels
