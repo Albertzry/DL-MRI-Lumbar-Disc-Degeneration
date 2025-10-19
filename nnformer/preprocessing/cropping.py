@@ -35,10 +35,11 @@ AUGMENT_AT_RESAMPLE = True
 # 增强超参数（概率与强度范围）
 AUG_CFG = {
     "p_rotate": 0.5,
-    "max_rotate_deg": 10.0,  # 每个轴的最大旋转角度
+    "max_rotate_deg": 3.0,  # 每个轴的最大旋转角度
     "p_flip": 0.5,           # 针对每个轴独立判定是否翻转
+    "allow_flip_z": False,   # 是否允许 Z 轴翻转（按需关闭）
     "p_gamma": 0.3,
-    "gamma_range": (0.7, 1.5),
+    "gamma_range": (0.9, 1.1),
     "p_brightness_contrast": 0.3,
     "contrast_range": (0.9, 1.1),
     "brightness_std_rel": 0.1,  # 亮度偏移的相对标准差（相对每通道 std）
@@ -174,14 +175,15 @@ def _apply_intensity_ops(data_czyx, rng, cfg):
 
     # 低分辨率模拟：下采样再上采样回原尺寸
     if _maybe(cfg["p_lowres"], rng):
+        # 仅在 XY 平面降采样/上采样，保持 Z 不变
         factor = _rand(rng, *cfg["lowres_factor_range"])  # 0.5~0.8
         _, Z, Y, X = out.shape
-        new_Z = max(1, int(round(Z * factor)))
+        new_Z = Z
         new_Y = max(1, int(round(Y * factor)))
         new_X = max(1, int(round(X * factor)))
         for c in range(C):
-            low = ndi_zoom(out[c], (new_Z / Z, new_Y / Y, new_X / X), order=1)
-            out[c] = ndi_zoom(low, (Z / low.shape[0], Y / low.shape[1], X / low.shape[2]), order=1)
+            low = ndi_zoom(out[c], (1.0, new_Y / Y, new_X / X), order=1)
+            out[c] = ndi_zoom(low, (1.0, Y / low.shape[1], X / low.shape[2]), order=1)
 
     return out
 
@@ -198,7 +200,8 @@ def _apply_geometric_ops(data_czyx, seg_zyx, rng, cfg):
 
     # 随机翻转（每轴独立判定）
     if _maybe(cfg["p_flip"], rng):
-        if _maybe(0.5, rng):  # Z 轴
+        # 可选：Z 轴翻转，按需关闭
+        if cfg.get("allow_flip_z", False) and _maybe(0.5, rng):  # Z 轴
             d_out = d_out[:, ::-1, :, :]
             if s_out is not None:
                 s_out = s_out[::-1, :, :]
