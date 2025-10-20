@@ -36,18 +36,18 @@ AUGMENT_AT_RESAMPLE = True
 AUG_CFG = {
     "p_rotate": 0.5,
     "max_rotate_deg": 3.0,  # 每个轴的最大旋转角度
-    "p_flip": 0.5,           # 针对每个轴独立判定是否翻转
+    "p_flip": 0.3,           # 针对每个轴独立判定是否翻转
     "allow_flip_z": False,   # 是否允许 Z 轴翻转（按需关闭）
-    "p_gamma": 0.3,
+    "p_gamma": 0.2,
     "gamma_range": (0.9, 1.1),
-    "p_brightness_contrast": 0.3,
+    "p_brightness_contrast": 0.2,
     "contrast_range": (0.9, 1.1),
     "brightness_std_rel": 0.1,  # 亮度偏移的相对标准差（相对每通道 std）
-    "p_noise": 0.3,
+    "p_noise": 0.2,
     "noise_std_rel": (0.01, 0.05),
-    "p_blur": 0.3,
+    "p_blur": 0.2,
     "blur_sigma_range": (0.5, 1.2),  # 以体素为单位
-    "p_lowres": 0.3,
+    "p_lowres": 0.2,
     "lowres_factor_range": (0.5, 0.8),  # 缩小因子，随后再放回原尺寸
     "seed": None,
 }
@@ -252,6 +252,13 @@ def apply_augmentations(data_czyx, seg_zyx=None, cfg=AUG_CFG):
     # 先几何，再强度（强度需在最终对齐后的图像上进行）
     data_geo, seg_geo = _apply_geometric_ops(data_czyx, seg_zyx, rng, cfg)
     data_out = _apply_intensity_ops(data_geo, rng, cfg)
+
+    # 提示增强已完成（包含输出形状以便调试）
+    try:
+        print("apply_augmentations: 增强已完成，output shape:", data_out.shape)
+    except Exception:
+        print("apply_augmentations: 增强已完成")
+
     return data_out, seg_geo
 
 
