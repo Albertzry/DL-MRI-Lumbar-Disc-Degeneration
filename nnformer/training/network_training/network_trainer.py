@@ -146,13 +146,6 @@ class NetworkTrainer(object):
     def load_dataset(self):
         pass
 
-    def on_epoch_start(self):
-        """
-        Optional hook that is called at the beginning of each epoch.
-        Subclasses can override this to adjust state (e.g., augmentation schedules).
-        """
-        pass
-
     def do_split(self):
         """
         This is a suggestion for if your dataset is a dictionary (my personal standard)
@@ -473,9 +466,6 @@ class NetworkTrainer(object):
 
             # train one epoch
             self.network.train()
-
-            # call hook for subclasses (e.g., to update augmentation probabilities)
-            self.on_epoch_start()
 
             if self.use_progress_bar:
                 with trange(self.num_batches_per_epoch) as tbar:

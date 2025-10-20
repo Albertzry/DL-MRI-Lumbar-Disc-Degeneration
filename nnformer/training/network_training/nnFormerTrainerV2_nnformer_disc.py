@@ -632,19 +632,3 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         ret = super().run_training()
         self.network.do_ds = ds
         return ret
-
-    def on_epoch_start(self):
-        super().on_epoch_start()
-        # 在每个 epoch 开头，根据线性衰减策略更新增强概率
-        try:
-            from nnformer.training.data_augmentation.data_augmentation_moreDA import (
-                compute_linear_decay_prob, set_transform_probabilities
-            )
-            p = compute_linear_decay_prob(self.epoch, self.max_num_epochs, p_start=0.5, p_end=0.1)
-            if hasattr(self, 'tr_gen') and self.tr_gen is not None and hasattr(self.tr_gen, 'transform'):
-                set_transform_probabilities(self.tr_gen.transform, p)
-                self.print_to_log_file(f"Augmentation probability decayed to {p:.3f}")
-            if hasattr(self, 'val_gen') and self.val_gen is not None and hasattr(self.val_gen, 'transform'):
-                set_transform_probabilities(self.val_gen.transform, p)
-        except Exception as e:
-            self.print_to_log_file(f"[WARN] Failed to set decayed aug prob: {e}")

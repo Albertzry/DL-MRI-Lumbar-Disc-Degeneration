@@ -34,57 +34,6 @@ except ImportError as ie:
     NonDetMultiThreadedAugmenter = None
 
 
-def compute_linear_decay_prob(epoch, max_epoch, p_start=0.5, p_end=0.1):
-    """Linear decay: p = p_end + (p_start - p_end) * (1 - epoch / max_epoch).
-    Safe against None or zero values.
-    """
-    if epoch is None or max_epoch is None or max_epoch <= 0:
-        return float(p_start)
-    ratio = float(epoch) / float(max_epoch)
-    ratio = min(max(ratio, 0.0), 1.0)
-    return float(p_end + (p_start - p_end) * (1.0 - ratio))
-
-
-def set_transform_probabilities(compose, p):
-    """Recursively set per-sample augmentation probabilities in a Compose pipeline.
-
-    - For SpatialTransform: set p_rot_per_sample / p_scale_per_sample / p_el_per_sample
-    - For intensity & resample transforms: set p_per_sample
-    MirrorTransform is left unchanged.
-    """
-    from batchgenerators.transforms import Compose as BGCompose, SpatialTransform as BGSpatialTransform
-    from batchgenerators.transforms.noise_transforms import GaussianNoiseTransform as BGGaussianNoiseTransform, \
-        GaussianBlurTransform as BGGaussianBlurTransform
-    from batchgenerators.transforms.color_transforms import BrightnessMultiplicativeTransform as BGBrightnessMult, \
-        ContrastAugmentationTransform as BGContrast, BrightnessTransform as BGBrightness
-    from batchgenerators.transforms.resample_transforms import SimulateLowResolutionTransform as BGLowRes
-    # GammaTransform is imported at module scope above; reuse here
-    from batchgenerators.transforms import GammaTransform as BGGamma
-
-    def _apply(t):
-        # Spatial
-        if isinstance(t, BGSpatialTransform):
-            if hasattr(t, 'p_rot_per_sample'):
-                t.p_rot_per_sample = float(p)
-            if hasattr(t, 'p_scale_per_sample'):
-                t.p_scale_per_sample = float(p)
-            if hasattr(t, 'p_el_per_sample'):
-                t.p_el_per_sample = float(p)
-
-        # Intensity / LowRes
-        for cls in (BGGaussianNoiseTransform, BGGaussianBlurTransform,
-                    BGBrightnessMult, BGContrast, BGBrightness, BGLowRes, BGGamma):
-            if isinstance(t, cls) and hasattr(t, 'p_per_sample'):
-                t.p_per_sample = float(p)
-
-        # Recurse
-        if isinstance(t, BGCompose):
-            for tt in t.transforms:
-                _apply(tt)
-
-    _apply(compose)
-
-
 def get_moreDA_augmentation(dataloader_train, dataloader_val, patch_size, params=default_3D_augmentation_params,
                             border_val_seg=-1,
                             seeds_train=None, seeds_val=None, order_seg=1, order_data=3, deep_supervision_scales=None,
