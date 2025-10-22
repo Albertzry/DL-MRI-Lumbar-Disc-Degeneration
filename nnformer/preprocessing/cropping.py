@@ -251,54 +251,17 @@ def _apply_geometric_ops(data_czyx, seg_zyx, rng, cfg):
             for c in range(C):
                 # 缩放图像
                 scaled = ndi_zoom(d_out[c], (new_Z/Z, new_Y/Y, new_X/X), order=1)
-                # 裁剪或填充回原尺寸
-                if scaled.shape[0] >= Z:
-                    start_z = (scaled.shape[0] - Z) // 2
-                    d_out[c] = scaled[start_z:start_z+Z, :, :]
-                else:
-                    pad_z = (Z - scaled.shape[0]) // 2
-                    d_out[c] = np.pad(scaled, ((pad_z, Z-scaled.shape[0]-pad_z), (0, 0), (0, 0)), mode='constant')
                 
-                if scaled.shape[1] >= Y:
-                    start_y = (scaled.shape[1] - Y) // 2
-                    d_out[c] = d_out[c][:, start_y:start_y+Y, :]
-                else:
-                    pad_y = (Y - scaled.shape[1]) // 2
-                    d_out[c] = np.pad(d_out[c], ((0, 0), (pad_y, Y-scaled.shape[1]-pad_y), (0, 0)), mode='constant')
-                
-                if scaled.shape[2] >= X:
-                    start_x = (scaled.shape[2] - X) // 2
-                    d_out[c] = d_out[c][:, :, start_x:start_x+X]
-                else:
-                    pad_x = (X - scaled.shape[2]) // 2
-                    d_out[c] = np.pad(d_out[c], ((0, 0), (0, 0), (pad_x, X-scaled.shape[2]-pad_x)), mode='constant')
+                # 使用更安全的方法：直接缩放回目标尺寸
+                # 这样可以避免所有尺寸不匹配的问题
+                d_out[c] = ndi_zoom(scaled, (Z/scaled.shape[0], Y/scaled.shape[1], X/scaled.shape[2]), order=1)
             
             if s_out is not None:
                 # 对标签做相同处理，但使用最近邻插值
                 scaled_seg = ndi_zoom(s_out, (new_Z/Z, new_Y/Y, new_X/X), order=0)
-                # 同样的裁剪/填充逻辑
-                if scaled_seg.shape[0] >= Z:
-                    start_z = (scaled_seg.shape[0] - Z) // 2
-                    s_out = scaled_seg[start_z:start_z+Z, :, :]
-                else:
-                    pad_z = (Z - scaled_seg.shape[0]) // 2
-                    s_out = np.pad(scaled_seg, ((pad_z, Z-scaled_seg.shape[0]-pad_z), (0, 0), (0, 0)), mode='constant', constant_values=-1)
                 
-                if scaled_seg.shape[1] >= Y:
-                    start_y = (scaled_seg.shape[1] - Y) // 2
-                    s_out = s_out[:, start_y:start_y+Y, :]
-                else:
-                    pad_y = (Y - scaled_seg.shape[1]) // 2
-                    s_out = np.pad(s_out, ((0, 0), (pad_y, Y-scaled_seg.shape[1]-pad_y), (0, 0)), mode='constant', constant_values=-1)
-                
-                if scaled_seg.shape[2] >= X:
-                    start_x = (scaled_seg.shape[2] - X) // 2
-                    s_out = s_out[:, :, start_x:start_x+X]
-                else:
-                    pad_x = (X - scaled_seg.shape[2]) // 2
-                    s_out = np.pad(s_out, ((0, 0), (0, 0), (pad_x, X-scaled_seg.shape[2]-pad_x)), mode='constant', constant_values=-1)
-                
-                s_out = s_out.astype(np.int16, copy=False)
+                # 缩放回目标尺寸，使用最近邻插值保持标签离散性
+                s_out = ndi_zoom(scaled_seg, (Z/scaled_seg.shape[0], Y/scaled_seg.shape[1], X/scaled_seg.shape[2]), order=0).astype(np.int16)
 
     # 随机小角度旋转（绕三个轴，保持形状）
     if _maybe(cfg["p_rotate"], rng):
