@@ -33,8 +33,7 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast
 from nnformer.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
-from nnformer.training.data_augmentation.data_augmentation_moreDA import get_patch_size
-from nnformer.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, default_3D_augmentation_params
+from nnformer.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, default_3D_augmentation_params, get_patch_size
 
 
 class DiscSegmentationLoss(nn.Module):
