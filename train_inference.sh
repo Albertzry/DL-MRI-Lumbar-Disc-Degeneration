@@ -18,7 +18,8 @@ if ${train}
 then
 	
 	cd /root/DL-MRI-Lumbar-Disc-Degeneration/nnformer
-	CUDA_VISIBLE_DEVICES=${cuda} nnFormer_train 3d_fullres nnFormerTrainerV2_nnformer_disc ${task} 0
+	#CUDA_VISIBLE_DEVICES=${cuda} nnFormer_train 3d_fullres nnFormerTrainerV2_nnformer_disc ${task} 0
+    CUDA_VISIBLE_DEVICES=1 nnFormer_train 3d_fullres nnFormerTrainerV2_nnformer_disc ${task} 0
 fi
 
 # if ${predict}

@@ -126,8 +126,8 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.embedding_patch_size=[1,2,2]  # 更小的patch size
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
         # 渐进式下采样：最终分辨率 [80, 16, 16]
-        self.down_stride=[[1,2,2],[1,2,2],[1,4,4],[1,4,4]]
-        self.deep_supervision=True  # 【关键优化】：启用深度监督提升训练效果
+        self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
+        self.deep_supervision=False  # 【关键优化】：启用深度监督提升训练效果
         
         # 【关键优化】：使用专门针对椎间盘分割优化的损失函数
         self.loss = DiscSegmentationLoss(num_classes=3, alpha=0.25, gamma=2.0, 
