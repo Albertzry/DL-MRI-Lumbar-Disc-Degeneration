@@ -33,6 +33,8 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast
 from nnformer.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
+from nnformer.training.data_augmentation.data_augmentation_moreDA import get_patch_size
+from nnformer.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, default_3D_augmentation_params
 
 
 class DiscSegmentationLoss(nn.Module):
@@ -147,6 +149,9 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
                 self.load_plans_file()
             
             self.process_plans(self.plans)
+            
+            # 设置数据增强参数
+            self.setup_DA_params()
 
             if self.deep_supervision:
                 ################# Here we wrap the loss for deep supervision ############
@@ -667,3 +672,52 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         ret = super().run_training()
         self.network.do_ds = ds
         return ret
+
+    def setup_DA_params(self):
+        """
+        设置数据增强参数，包括basic_generator_patch_size
+        """
+        self.deep_supervision_scales = [[1, 1, 1]] + list(list(i) for i in 1 / np.cumprod(
+            np.vstack(self.net_num_pool_op_kernel_sizes), axis=0))[:-1]
+
+        if self.threeD:
+            self.data_aug_params = default_3D_augmentation_params
+            self.data_aug_params['rotation_x'] = (-15. / 360 * 2. * np.pi, 15. / 360 * 2. * np.pi)
+            self.data_aug_params['rotation_y'] = (-15. / 360 * 2. * np.pi, 15. / 360 * 2. * np.pi)
+            self.data_aug_params['rotation_z'] = (-15. / 360 * 2. * np.pi, 15. / 360 * 2. * np.pi)
+            if self.do_dummy_2D_aug:
+                self.data_aug_params["dummy_2D"] = True
+                self.print_to_log_file("Using dummy2d data augmentation")
+                self.data_aug_params["elastic_deform_alpha"] = \
+                    default_2D_augmentation_params["elastic_deform_alpha"]
+                self.data_aug_params["elastic_deform_sigma"] = \
+                    default_2D_augmentation_params["elastic_deform_sigma"]
+                self.data_aug_params["rotation_x"] = default_2D_augmentation_params["rotation_x"]
+        else:
+            self.do_dummy_2D_aug = False
+            if max(self.patch_size) / min(self.patch_size) > 1.5:
+                default_2D_augmentation_params['rotation_x'] = (-15. / 360 * 2. * np.pi, 15. / 360 * 2. * np.pi)
+            self.data_aug_params = default_2D_augmentation_params
+        self.data_aug_params["mask_was_used_for_normalization"] = self.use_mask_for_norm
+
+        if self.do_dummy_2D_aug:
+            self.basic_generator_patch_size = get_patch_size(self.patch_size[1:],
+                                                             self.data_aug_params['rotation_x'],
+                                                             self.data_aug_params['rotation_y'],
+                                                             self.data_aug_params['rotation_z'],
+                                                             self.data_aug_params['scale_range'])
+            self.basic_generator_patch_size = np.array([self.patch_size[0]] + list(self.basic_generator_patch_size))
+            patch_size_for_spatialtransform = self.patch_size[1:]
+        else:
+            self.basic_generator_patch_size = get_patch_size(self.patch_size, self.data_aug_params['rotation_x'],
+                                                             self.data_aug_params['rotation_y'],
+                                                             self.data_aug_params['rotation_z'],
+                                                             self.data_aug_params['scale_range'])
+            patch_size_for_spatialtransform = self.patch_size
+
+        self.data_aug_params["scale_range"] = (0.7, 1.4)
+        self.data_aug_params["do_elastic"] = False
+        self.data_aug_params['selected_seg_channels'] = [0]
+        self.data_aug_params['patch_size_for_spatialtransform'] = patch_size_for_spatialtransform
+
+        self.data_aug_params["num_cached_per_thread"] = 2
