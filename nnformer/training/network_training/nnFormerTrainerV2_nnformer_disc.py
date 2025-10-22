@@ -122,12 +122,25 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.embedding_dim=96
         self.depths=[2, 2, 2, 2]
         self.num_heads=[3, 6, 12, 24]
-        # 使用平衡的下采样策略，平衡局部和全局信息
-        self.embedding_patch_size=[1,2,2]  # 更小的patch size
+        self.embedding_patch_size=[1,4,4]  # 保持原始patch size
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
-        # 渐进式下采样：最终分辨率 [80, 16, 16]
-        self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
+        # 【修正】：使用标准的下采样策略，确保与 nnFormer 兼容
+        # 基于 crop_size=[85, 216, 256] 和 embedding_patch_size=[1,4,4]
+        # 使用标准的 2x2x2 下采样，这是 nnFormer 的默认策略
+        self.down_stride=[[2,2,2],[2,2,2],[2,2,2],[2,2,2]]
         self.deep_supervision=False  # 【关键优化】：启用深度监督提升训练效果
+        
+        # 【新增】：使用标准的 pool_op_kernel_sizes
+        # 这是 nnFormer 的标准配置，确保完全兼容
+        self.net_num_pool_op_kernel_sizes = [
+            [2, 2, 2],  # Stage 1: 标准 2x2x2 下采样
+            [2, 2, 2],  # Stage 2: 标准 2x2x2 下采样
+            [2, 2, 2],  # Stage 3: 标准 2x2x2 下采样
+            [2, 2, 2]   # Stage 4: 标准 2x2x2 下采样
+        ]
+        
+        # 对应的卷积核尺寸
+        self.net_conv_kernel_sizes = [[3, 3, 3]] * (len(self.net_num_pool_op_kernel_sizes) + 1)
         
         # 【关键优化】：使用专门针对椎间盘分割优化的损失函数
         self.loss = DiscSegmentationLoss(num_classes=3, alpha=0.25, gamma=2.0, 
