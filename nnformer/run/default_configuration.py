@@ -59,8 +59,9 @@ def get_default_configuration(network, task, network_trainer, plans_identifier=d
     #     pickle_file.close()
     if task=='Task001_disc':
         plans['plans_per_stage'][Stage]['batch_size']=2
-        plans['plans_per_stage'][Stage]['patch_size']=np.array([96,160,160])
-        plans['plans_per_stage'][Stage]['pool_op_kernel_sizes']=[[1,4,4], [1,2,2], [2,2,2], [2,2,2]]
+        # 使用方案3：patch_size [80,256,256] 配合渐进式下采样
+        plans['plans_per_stage'][Stage]['patch_size']=np.array([80,256,256])
+        plans['plans_per_stage'][Stage]['pool_op_kernel_sizes']=[[1,2,2], [1,2,2], [1,2,2], [1,2,2]]
         pickle_file = open(plans_file,'wb')
         pickle.dump(plans, pickle_file)
         pickle_file.close()
