@@ -30,26 +30,44 @@ RESAMPLE_TARGET_SIZE = (512, 512, 85)  # ITK 顺序 (X, Y, Z)
 CENTER_CROP_SIZE = (85, 256, 216)      # numpy 顺序 (Z, X, Y) -> 物理尺寸 [216, 256, 85]
 
 # 在重采样后启用数据增强
+# 【策略调整】：将增强固化到预处理阶段，避免训练时CPU瓶颈
 AUGMENT_AT_RESAMPLE = True
 
-# 增强超参数（概率与强度范围）
+# 【优化】：增强数据增强策略，专门针对椎间盘分割
 AUG_CFG = {
-    "p_rotate": 0.5,
-    "max_rotate_deg": 3.0,  # 每个轴的最大旋转角度
-    "p_flip": 0.3,           # 针对每个轴独立判定是否翻转
-    "allow_flip_z": False,   # 是否允许 Z 轴翻转（按需关闭）
-    "p_gamma": 0.2,
-    "gamma_range": (0.9, 1.1),
-    "p_brightness_contrast": 0.2,
-    "contrast_range": (0.9, 1.1),
-    "brightness_std_rel": 0.1,  # 亮度偏移的相对标准差（相对每通道 std）
-    "p_noise": 0.2,
-    "noise_std_rel": (0.01, 0.05),
-    "p_blur": 0.2,
-    "blur_sigma_range": (0.5, 1.2),  # 以体素为单位
-    "p_lowres": 0.2,
-    "lowres_factor_range": (0.5, 0.8),  # 缩小因子，随后再放回原尺寸
-    "seed": None,
+    # 【几何增强】：适配脊柱解剖特点，增强边界细节
+    "p_rotate": 0.6,              # 提高旋转概率，增强几何鲁棒性
+    "max_rotate_deg": 15.0,       # 增加旋转角度范围，但保持合理
+    
+    "p_flip": 0.5,                # 提高翻转概率
+    "allow_flip_z": False,        # Z轴（层间方向）不翻转
+    
+    # 【强度增强】：增强对比度和亮度鲁棒性
+    "p_gamma": 0.5,               # 提高Gamma校正概率
+    "gamma_range": (0.8, 1.2),    # 扩大范围，增强强度变化
+    
+    "p_brightness_contrast": 0.5, # 提高亮度对比度调整概率
+    "contrast_range": (0.85, 1.15), # 扩大对比度范围
+    "brightness_std_rel": 0.1,    # 增加亮度变化
+    
+    "p_noise": 0.4,               # 提高噪声增强概率
+    "noise_std_rel": (0.01, 0.04),# 适度增加噪声强度
+    
+    "p_blur": 0.3,                # 提高模糊概率
+    "blur_sigma_range": (0.2, 1.0),# 扩大模糊范围
+    
+    "p_lowres": 0.25,             # 提高低分辨率增强概率
+    "lowres_factor_range": (0.7, 0.9),  # 调整范围
+    
+    # 【新增】：针对椎间盘分割的专门增强
+    "p_elastic": 0.3,             # 弹性变形（模拟脊柱弯曲）
+    "elastic_alpha": (0, 200),    # 弹性变形强度
+    "elastic_sigma": (30, 50),    # 弹性变形平滑度
+    
+    "p_scale": 0.4,               # 缩放增强
+    "scale_range": (0.9, 1.1),    # 缩放范围
+    
+    "seed": None,                 # 每次调用随机（预处理时每个样本不同）
 }
 
 
@@ -103,12 +121,13 @@ def resample_sitk_image_to_size(itk_image, target_size, is_seg=False):
     )
 
 
-def _torch_interpolate_3d(arr_czyx, target_size_xyz):
-    """使用 PyTorch 对 3D 体数据做三线性插值。
+def _torch_interpolate_3d(arr_czyx, target_size_xyz, is_seg=False):
+    """使用 PyTorch 对 3D 体数据做插值。
 
     入参:
     - arr_czyx: numpy 数组，形状 (C, Z, Y, X)
     - target_size_xyz: 目标体素数，顺序 (X, Y, Z)
+    - is_seg: 是否为分割标签（True=最近邻插值，False=三线性插值）
 
     返回:
     - 同 dtype 的 numpy 数组，形状 (C, Z, Y, X)
@@ -117,7 +136,13 @@ def _torch_interpolate_3d(arr_czyx, target_size_xyz):
     tx, ty, tz = [int(i) for i in target_size_xyz]
     # torch 需要 (N, C, D, H, W)，size=(D, H, W)=(Z, Y, X)
     t = torch.from_numpy(arr_czyx).unsqueeze(0).float()
-    out = F.interpolate(t, size=(tz, ty, tx), mode="trilinear", align_corners=False)
+    
+    # 【关键修改】：标签用最近邻插值，避免边界模糊和非法值
+    mode = "nearest" if is_seg else "trilinear"
+    if is_seg:
+        out = F.interpolate(t, size=(tz, ty, tx), mode=mode)
+    else:
+        out = F.interpolate(t, size=(tz, ty, tx), mode=mode, align_corners=False)
     return out.squeeze(0).cpu().numpy()
 
 
@@ -213,6 +238,67 @@ def _apply_geometric_ops(data_czyx, seg_zyx, rng, cfg):
             d_out = d_out[:, :, :, ::-1]
             if s_out is not None:
                 s_out = s_out[:, :, ::-1]
+
+    # 随机缩放
+    if _maybe(cfg.get("p_scale", 0), rng):
+        scale_factor = _rand(rng, *cfg["scale_range"])
+        if abs(scale_factor - 1.0) > 1e-3:
+            # 计算新的尺寸
+            new_Z = max(1, int(round(Z * scale_factor)))
+            new_Y = max(1, int(round(Y * scale_factor)))
+            new_X = max(1, int(round(X * scale_factor)))
+            
+            for c in range(C):
+                # 缩放图像
+                scaled = ndi_zoom(d_out[c], (new_Z/Z, new_Y/Y, new_X/X), order=1)
+                # 裁剪或填充回原尺寸
+                if scaled.shape[0] >= Z:
+                    start_z = (scaled.shape[0] - Z) // 2
+                    d_out[c] = scaled[start_z:start_z+Z, :, :]
+                else:
+                    pad_z = (Z - scaled.shape[0]) // 2
+                    d_out[c] = np.pad(scaled, ((pad_z, Z-scaled.shape[0]-pad_z), (0, 0), (0, 0)), mode='constant')
+                
+                if scaled.shape[1] >= Y:
+                    start_y = (scaled.shape[1] - Y) // 2
+                    d_out[c] = d_out[c][:, start_y:start_y+Y, :]
+                else:
+                    pad_y = (Y - scaled.shape[1]) // 2
+                    d_out[c] = np.pad(d_out[c], ((0, 0), (pad_y, Y-scaled.shape[1]-pad_y), (0, 0)), mode='constant')
+                
+                if scaled.shape[2] >= X:
+                    start_x = (scaled.shape[2] - X) // 2
+                    d_out[c] = d_out[c][:, :, start_x:start_x+X]
+                else:
+                    pad_x = (X - scaled.shape[2]) // 2
+                    d_out[c] = np.pad(d_out[c], ((0, 0), (0, 0), (pad_x, X-scaled.shape[2]-pad_x)), mode='constant')
+            
+            if s_out is not None:
+                # 对标签做相同处理，但使用最近邻插值
+                scaled_seg = ndi_zoom(s_out, (new_Z/Z, new_Y/Y, new_X/X), order=0)
+                # 同样的裁剪/填充逻辑
+                if scaled_seg.shape[0] >= Z:
+                    start_z = (scaled_seg.shape[0] - Z) // 2
+                    s_out = scaled_seg[start_z:start_z+Z, :, :]
+                else:
+                    pad_z = (Z - scaled_seg.shape[0]) // 2
+                    s_out = np.pad(scaled_seg, ((pad_z, Z-scaled_seg.shape[0]-pad_z), (0, 0), (0, 0)), mode='constant', constant_values=-1)
+                
+                if scaled_seg.shape[1] >= Y:
+                    start_y = (scaled_seg.shape[1] - Y) // 2
+                    s_out = s_out[:, start_y:start_y+Y, :]
+                else:
+                    pad_y = (Y - scaled_seg.shape[1]) // 2
+                    s_out = np.pad(s_out, ((0, 0), (pad_y, Y-scaled_seg.shape[1]-pad_y), (0, 0)), mode='constant', constant_values=-1)
+                
+                if scaled_seg.shape[2] >= X:
+                    start_x = (scaled_seg.shape[2] - X) // 2
+                    s_out = s_out[:, :, start_x:start_x+X]
+                else:
+                    pad_x = (X - scaled_seg.shape[2]) // 2
+                    s_out = np.pad(s_out, ((0, 0), (0, 0), (pad_x, X-scaled_seg.shape[2]-pad_x)), mode='constant', constant_values=-1)
+                
+                s_out = s_out.astype(np.int16, copy=False)
 
     # 随机小角度旋转（绕三个轴，保持形状）
     if _maybe(cfg["p_rotate"], rng):
@@ -350,12 +436,13 @@ def load_case_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE
     seg_arr = sitk.GetArrayFromImage(seg_itk) if seg_itk is not None else None
 
     if target_size is not None:
-        # 使用 PyTorch 做三线性插值，输出数组 (C, Z, Y, X)
-        data_npy = _torch_interpolate_3d(data_npy, target_size).astype(np.float32)
+        # 使用 PyTorch 做插值，输出数组 (C, Z, Y, X)
+        data_npy = _torch_interpolate_3d(data_npy, target_size, is_seg=False).astype(np.float32)
         if seg_arr is not None:
             seg_float = seg_arr.astype(np.float32, copy=False)
-            seg_res = _torch_interpolate_3d(seg_float[None], target_size)[0]
-            # 离散化回 {0,1,2}
+            # 【关键修改】：标签用最近邻插值，保持离散性
+            seg_res = _torch_interpolate_3d(seg_float[None], target_size, is_seg=True)[0]
+            # 确保标签值在 {0,1,2} 中
             seg_res = np.rint(seg_res)
             seg_res = np.clip(seg_res, 0, 2).astype(np.int16, copy=False)
             seg_npy = seg_res[None].astype(np.float32)

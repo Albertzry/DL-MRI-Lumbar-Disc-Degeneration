@@ -18,25 +18,75 @@ from typing import Tuple
 
 import numpy as np
 import torch
-from nnformer.training.data_augmentation.data_augmentation_moreDA import get_moreDA_augmentation
 from nnformer.training.loss_functions.deep_supervision import MultipleOutputLoss2
+from nnformer.training.loss_functions.dice_loss import DC_and_CE_loss, SoftDiceLoss
 from nnformer.utilities.to_torch import maybe_to_torch, to_cuda
 from nnformer.network_architecture.nnFormer_disc import nnFormer
 from nnformer.network_architecture.initialization import InitWeights_He
 from nnformer.network_architecture.neural_network import SegmentationNetwork
-from nnformer.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, \
-    get_patch_size, default_3D_augmentation_params
 from nnformer.training.dataloading.dataset_loading import unpack_dataset
 from nnformer.training.network_training.nnFormerTrainer import nnFormerTrainer
 from nnformer.utilities.nd_softmax import softmax_helper
 from sklearn.model_selection import KFold
 from torch import nn
+import torch.nn.functional as F
 from torch.cuda.amp import autocast
 from nnformer.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
 
 
+class DiscSegmentationLoss(nn.Module):
+    """
+    专门针对椎间盘分割优化的损失函数
+    - 结合Dice Loss和Focal Loss
+    - 处理类别不平衡问题
+    - 增强对边界细节的关注
+    """
+    def __init__(self, num_classes=3, alpha=0.25, gamma=2.0, dice_weight=1.0, focal_weight=1.0):
+        super(DiscSegmentationLoss, self).__init__()
+        self.num_classes = num_classes
+        self.alpha = alpha
+        self.gamma = gamma
+        self.dice_weight = dice_weight
+        self.focal_weight = focal_weight
+        
+        # 椎间盘分割的类别权重：背景、正常、退变
+        self.class_weights = torch.tensor([0.1, 1.0, 2.0], dtype=torch.float32)  # 退变椎间盘权重更高
+        
+        # Dice Loss
+        self.dice_loss = SoftDiceLoss(apply_nonlin=softmax_helper, 
+                                     batch_dice=True, 
+                                     smooth=1e-5, 
+                                     do_bg=False)
+        
+    def focal_loss(self, inputs, targets):
+        """Focal Loss for addressing class imbalance"""
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.class_weights.to(inputs.device))
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1-pt)**self.gamma * ce_loss
+        return focal_loss.mean()
     
+    def forward(self, inputs, targets):
+        # 确保targets是long类型
+        if targets.dtype != torch.long:
+            targets = targets.long()
+        
+        # 如果targets是one-hot，转换为类别索引
+        if len(targets.shape) == 5:  # (B, C, D, H, W)
+            targets = torch.argmax(targets, dim=1)
+        
+        # Focal Loss
+        focal = self.focal_loss(inputs, targets)
+        
+        # Dice Loss
+        dice = self.dice_loss(inputs, targets)
+        
+        # 组合损失
+        total_loss = self.focal_weight * focal + self.dice_weight * dice
+        
+        return total_loss
+
+
 class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
     """
     Info for Fabian: same as internal nnUNetTrainerV2_2
@@ -47,7 +97,10 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         super().__init__(plans_file, fold, output_folder, dataset_directory, batch_dice, stage, unpack_data,
                          deterministic, fp16)
         self.max_num_epochs = 1000
-        self.initial_lr = 5e-3
+        # 【修改】：降低初始学习率从 5e-3 到 2e-3，更稳定的训练
+        # 椎间盘退变分割是细粒度任务，需要更谨慎的学习率
+        self.initial_lr = 2e-3
+        self.warmup_epochs = 50  # 学习率warmup轮数
         self.deep_supervision_scales = None
         self.ds_loss_weights = None
         self.pin_memory = True
@@ -71,12 +124,17 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.embedding_patch_size=[1,4,4]
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
         self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
-        self.deep_supervision=False
+        self.deep_supervision=True  # 【关键优化】：启用深度监督提升训练效果
+        
+        # 【关键优化】：使用专门针对椎间盘分割优化的损失函数
+        self.loss = DiscSegmentationLoss(num_classes=3, alpha=0.25, gamma=2.0, 
+                                        dice_weight=1.0, focal_weight=0.5)
+        
     def initialize(self, training=True, force_load_plans=False):
         """
-        - replaced get_default_augmentation with get_moreDA_augmentation
-        - enforce to only run this code once
-        - loss function wrapper for deep supervision
+        【简化版本】：移除所有数据增强相关代码，专注核心训练逻辑
+        - 数据增强已在预处理阶段完成
+        - 直接使用基础数据加载器，无动态增强
 
         :param training:
         :param force_load_plans:
@@ -90,7 +148,6 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
             
             self.process_plans(self.plans)
 
-            self.setup_DA_params()
             if self.deep_supervision:
                 ################# Here we wrap the loss for deep supervision ############
                 # we need to know the number of outputs of the network
@@ -111,8 +168,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
                 ################# END ###################
             
             self.folder_with_preprocessed_data = join(self.dataset_directory, self.plans['data_identifier'] +"_stage%d" % self.stage)
-            seeds_train = np.random.random_integers(0, 99999, self.data_aug_params.get('num_threads'))
-            seeds_val = np.random.random_integers(0, 99999, max(self.data_aug_params.get('num_threads') // 2, 1))                         
+                         
             if training:
                 self.dl_tr, self.dl_val = self.get_basic_generators()
                 if self.unpack_data:
@@ -124,21 +180,15 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
                         "INFO: Not unpacking data! Training may be slow due to that. Pray you are not using 2d or you "
                         "will wait all winter for your model to finish!")
 
-                self.tr_gen, self.val_gen = get_moreDA_augmentation(
-                    self.dl_tr, self.dl_val,
-                    self.data_aug_params[
-                        'patch_size_for_spatialtransform'],
-                    self.data_aug_params,
-                    deep_supervision_scales=self.deep_supervision_scales if self.deep_supervision else None,
-                    pin_memory=self.pin_memory,
-                    use_nondetMultiThreadedAugmenter=False,
-                    seeds_train=seeds_train,
-                    seeds_val=seeds_val
-                )
+                # 【简化】：直接使用基础数据加载器，无任何增强
+                self.tr_gen = self.dl_tr
+                self.val_gen = self.dl_val
+                
                 self.print_to_log_file("TRAINING KEYS:\n %s" % (str(self.dataset_tr.keys())),
                                        also_print_to_console=False)
                 self.print_to_log_file("VALIDATION KEYS:\n %s" % (str(self.dataset_val.keys())),
                                        also_print_to_console=False)
+                self.print_to_log_file("数据增强已在预处理阶段完成，训练时直接使用原始数据")
             else:
                 pass
 
@@ -238,21 +288,57 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
                                                          use_sliding_window: bool = True, step_size: float = 0.5,
                                                          use_gaussian: bool = True, pad_border_mode: str = 'constant',
                                                          pad_kwargs: dict = None, all_in_gpu: bool = False,
-                                                         verbose: bool = True, mixed_precision=True) -> Tuple[np.ndarray, np.ndarray]:
+                                                         verbose: bool = True, mixed_precision=True,
+                                                         use_tta: bool = True) -> Tuple[np.ndarray, np.ndarray]:
         """
-        We need to wrap this because we need to enforce self.network.do_ds = False for prediction
+        【优化】：添加测试时增强（TTA）提升推理效果
         """
         ds = self.network.do_ds
         self.network.do_ds = False
-        ret = super().predict_preprocessed_data_return_seg_and_softmax(data,
-                                                                       do_mirroring=do_mirroring,
-                                                                       mirror_axes=mirror_axes,
-                                                                       use_sliding_window=use_sliding_window,
-                                                                       step_size=step_size, use_gaussian=use_gaussian,
-                                                                       pad_border_mode=pad_border_mode,
-                                                                       pad_kwargs=pad_kwargs, all_in_gpu=all_in_gpu,
-                                                                       verbose=verbose,
-                                                                       mixed_precision=mixed_precision)
+        
+        if use_tta:
+            # 测试时增强：多次预测并平均
+            predictions = []
+            
+            # 原始预测
+            pred_orig = super().predict_preprocessed_data_return_seg_and_softmax(
+                data, do_mirroring=False, mirror_axes=mirror_axes,
+                use_sliding_window=use_sliding_window, step_size=step_size, 
+                use_gaussian=use_gaussian, pad_border_mode=pad_border_mode,
+                pad_kwargs=pad_kwargs, all_in_gpu=all_in_gpu, verbose=verbose,
+                mixed_precision=mixed_precision)
+            predictions.append(pred_orig[1])  # softmax
+            
+            # 翻转增强
+            if do_mirroring:
+                for axis in [0, 1, 2]:  # 沿每个轴翻转
+                    data_flipped = np.flip(data, axis=axis)
+                    pred_flipped = super().predict_preprocessed_data_return_seg_and_softmax(
+                        data_flipped, do_mirroring=False, mirror_axes=mirror_axes,
+                        use_sliding_window=use_sliding_window, step_size=step_size,
+                        use_gaussian=use_gaussian, pad_border_mode=pad_border_mode,
+                        pad_kwargs=pad_kwargs, all_in_gpu=all_in_gpu, verbose=False,
+                        mixed_precision=mixed_precision)
+                    # 翻转回来
+                    pred_flipped_back = np.flip(pred_flipped[1], axis=axis)
+                    predictions.append(pred_flipped_back)
+            
+            # 平均所有预测
+            avg_softmax = np.mean(predictions, axis=0)
+            seg = np.argmax(avg_softmax, axis=0).astype(np.uint8)
+            ret = (seg, avg_softmax)
+        else:
+            # 标准预测
+            ret = super().predict_preprocessed_data_return_seg_and_softmax(data,
+                                                                           do_mirroring=do_mirroring,
+                                                                           mirror_axes=mirror_axes,
+                                                                           use_sliding_window=use_sliding_window,
+                                                                           step_size=step_size, use_gaussian=use_gaussian,
+                                                                           pad_border_mode=pad_border_mode,
+                                                                           pad_kwargs=pad_kwargs, all_in_gpu=all_in_gpu,
+                                                                           verbose=verbose,
+                                                                           mixed_precision=mixed_precision)
+        
         self.network.do_ds = ds
         return ret
 
@@ -523,75 +609,24 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         for i in val_keys:
             self.dataset_val[i] = self.dataset[i]
 
-    def setup_DA_params(self):
-        """
-        - we increase roation angle from [-15, 15] to [-30, 30]
-        - scale range is now (0.7, 1.4), was (0.85, 1.25)
-        - we don't do elastic deformation anymore
-
-        :return:
-        """
-
-        self.deep_supervision_scales = [[1, 1, 1]] + list(list(i) for i in 1 / np.cumprod(
-            np.vstack(self.net_num_pool_op_kernel_sizes), axis=0))[:-1]
-
-        if self.threeD:
-            self.data_aug_params = default_3D_augmentation_params
-            self.data_aug_params['rotation_x'] = (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi)
-            self.data_aug_params['rotation_y'] = (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi)
-            self.data_aug_params['rotation_z'] = (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi)
-            if self.do_dummy_2D_aug:
-                self.data_aug_params["dummy_2D"] = True
-                self.print_to_log_file("Using dummy2d data augmentation")
-                self.data_aug_params["elastic_deform_alpha"] = \
-                    default_2D_augmentation_params["elastic_deform_alpha"]
-                self.data_aug_params["elastic_deform_sigma"] = \
-                    default_2D_augmentation_params["elastic_deform_sigma"]
-                self.data_aug_params["rotation_x"] = default_2D_augmentation_params["rotation_x"]
-        else:
-            self.do_dummy_2D_aug = False
-            if max(self.patch_size) / min(self.patch_size) > 1.5:
-                default_2D_augmentation_params['rotation_x'] = (-15. / 360 * 2. * np.pi, 15. / 360 * 2. * np.pi)
-            self.data_aug_params = default_2D_augmentation_params
-        self.data_aug_params["mask_was_used_for_normalization"] = self.use_mask_for_norm
-
-        if self.do_dummy_2D_aug:
-            self.basic_generator_patch_size = get_patch_size(self.patch_size[1:],
-                                                             self.data_aug_params['rotation_x'],
-                                                             self.data_aug_params['rotation_y'],
-                                                             self.data_aug_params['rotation_z'],
-                                                             self.data_aug_params['scale_range'])
-            self.basic_generator_patch_size = np.array([self.patch_size[0]] + list(self.basic_generator_patch_size))
-            patch_size_for_spatialtransform = self.patch_size[1:]
-        else:
-            self.basic_generator_patch_size = get_patch_size(self.patch_size, self.data_aug_params['rotation_x'],
-                                                             self.data_aug_params['rotation_y'],
-                                                             self.data_aug_params['rotation_z'],
-                                                             self.data_aug_params['scale_range'])
-            patch_size_for_spatialtransform = self.patch_size
-
-        self.data_aug_params["scale_range"] = (0.7, 1.4)
-        self.data_aug_params["do_elastic"] = False
-        self.data_aug_params['selected_seg_channels'] = [0]
-        self.data_aug_params['patch_size_for_spatialtransform'] = patch_size_for_spatialtransform
-
-        self.data_aug_params["num_cached_per_thread"] = 2
 
     def maybe_update_lr(self, epoch=None):
         """
-        if epoch is not None we overwrite epoch. Else we use epoch = self.epoch + 1
-
-        (maybe_update_lr is called in on_epoch_end which is called before epoch is incremented.
-        herefore we need to do +1 here)
-
-        :param epoch:
-        :return:
+        【优化】：实现学习率warmup和更精细的调度策略
         """
         if epoch is None:
             ep = self.epoch + 1
         else:
             ep = epoch
-        self.optimizer.param_groups[0]['lr'] = poly_lr(ep, self.max_num_epochs, self.initial_lr, 0.9)
+            
+        # Warmup阶段：线性增长到初始学习率
+        if ep <= self.warmup_epochs:
+            lr = self.initial_lr * (ep / self.warmup_epochs)
+        else:
+            # Warmup后使用poly学习率衰减
+            lr = poly_lr(ep, self.max_num_epochs, self.initial_lr, 0.9)
+            
+        self.optimizer.param_groups[0]['lr'] = lr
         self.print_to_log_file("lr:", np.round(self.optimizer.param_groups[0]['lr'], decimals=6))
 
     def on_epoch_end(self):
