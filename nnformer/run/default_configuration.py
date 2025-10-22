@@ -59,13 +59,13 @@ def get_default_configuration(network, task, network_trainer, plans_identifier=d
     #     pickle_file.close()
     if task=='Task001_disc':
         plans['plans_per_stage'][Stage]['batch_size']=2
-        plans['plans_per_stage'][Stage]['patch_size']=np.array([86,160,160])
+        plans['plans_per_stage'][Stage]['patch_size']=np.array([80,160,160])
         plans['plans_per_stage'][Stage]['pool_op_kernel_sizes']=[
-            [1, 4, 4],   # Stage 1: 对应 down_stride[0] = [1,4,4]
-            [1, 8, 8],   # Stage 2: 对应 down_stride[1] = [1,8,8]  
-            [2, 16, 16], # Stage 3: 对应 down_stride[2] = [2,16,16]
-            [4, 32, 32]  # Stage 4: 对应 down_stride[3] = [4,32,32]
-        ]
+                [1, 2, 2],
+                [1, 4, 4],
+                [2, 4, 4],
+                [2, 8, 8]
+            ]
         pickle_file = open(plans_file,'wb')
         pickle.dump(plans, pickle_file)
         pickle_file.close()

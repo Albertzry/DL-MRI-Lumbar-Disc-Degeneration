@@ -124,10 +124,12 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.num_heads=[3, 6, 12, 24]
         self.embedding_patch_size=[1,4,4]  # 保持原始patch size
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
-        # 【修正】：使用你指定的下采样策略
-        # 基于 crop_size=[85, 216, 256] 和 embedding_patch_size=[1,4,4]
-        # 使用渐进式下采样策略
-        self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
+        self.down_stride = [
+                [1, 2, 2],
+                [1, 4, 4],
+                [2, 4, 4],
+                [2, 8, 8]
+            ]
         self.deep_supervision=False  # 【关键优化】：启用深度监督提升训练效果
         
         # 【关键优化】：使用专门针对椎间盘分割优化的损失函数
@@ -141,15 +143,11 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         """
         # 调用父类的 process_plans
         super().process_plans(plans)
-        
-        # 【新增】：为 nnFormer 设置正确的 pool_op_kernel_sizes
-        # 基于你的 down_stride 配置计算合适的池化核尺寸
-        # 注意：pool_op_kernel_sizes 需要与 down_stride 匹配
         self.net_num_pool_op_kernel_sizes = [
-            [1, 4, 4],   # Stage 1: 对应 down_stride[0] = [1,4,4]
-            [1, 8, 8],   # Stage 2: 对应 down_stride[1] = [1,8,8]  
-            [2, 16, 16], # Stage 3: 对应 down_stride[2] = [2,16,16]
-            [4, 32, 32]  # Stage 4: 对应 down_stride[3] = [4,32,32]
+            [1, 2, 2],  
+            [1, 4, 4],    
+            [2, 4, 4], 
+            [2, 8, 8]  
         ]
         
         # 对应的卷积核尺寸
