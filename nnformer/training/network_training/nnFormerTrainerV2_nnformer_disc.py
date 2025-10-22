@@ -126,9 +126,9 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
         self.down_stride = [
                 [1, 2, 2],
-                [1, 4, 4],
+                [1, 2, 2],
                 [2, 4, 4],
-                [2, 8, 8]
+                [2, 4, 4]
             ]
         self.deep_supervision=False  # 【关键优化】：启用深度监督提升训练效果
         
@@ -144,11 +144,11 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         # 调用父类的 process_plans
         super().process_plans(plans)
         self.net_num_pool_op_kernel_sizes = [
-            [1, 2, 2],  
-            [1, 4, 4],    
-            [2, 4, 4], 
-            [2, 8, 8]  
-        ]
+                [1, 2, 2],
+                [1, 2, 2],
+                [2, 4, 4],
+                [2, 4, 4]
+            ]
         
         # 对应的卷积核尺寸
         self.net_conv_kernel_sizes = [[3, 3, 3]] * (len(self.net_num_pool_op_kernel_sizes) + 1)

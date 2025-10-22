@@ -27,7 +27,7 @@ from scipy.ndimage import rotate as ndi_rotate, gaussian_filter as ndi_gaussian_
 
 # 预处理统一到固定体素网格后再做中心裁剪
 RESAMPLE_TARGET_SIZE = (512, 512, 85)  # ITK 顺序 (X, Y, Z)
-CENTER_CROP_SIZE = (85, 216, 256)      # numpy 顺序 (Z, X, Y) -> 与plans文件中的patch_size匹配
+CENTER_CROP_SIZE = (80, 256, 256)      
 
 # 在重采样后启用数据增强
 # 【策略调整】：将增强固化到预处理阶段，避免训练时CPU瓶颈
