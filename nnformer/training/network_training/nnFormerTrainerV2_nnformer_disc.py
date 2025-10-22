@@ -357,7 +357,8 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         """
         data_dict = next(data_generator)
         data = data_dict['data']
-        target = data_dict['target']
+        # 处理数据字典中的键名差异：DataLoader3D返回'seg'，增强器返回'target'
+        target = data_dict.get('target', data_dict.get('seg'))
 
         data = maybe_to_torch(data)
         target = maybe_to_torch(target)
