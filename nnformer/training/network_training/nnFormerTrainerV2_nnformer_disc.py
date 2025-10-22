@@ -124,28 +124,41 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.num_heads=[3, 6, 12, 24]
         self.embedding_patch_size=[1,4,4]  # 保持原始patch size
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
-        # 【修正】：使用标准的下采样策略，确保与 nnFormer 兼容
+        # 【修正】：使用你指定的下采样策略
         # 基于 crop_size=[85, 216, 256] 和 embedding_patch_size=[1,4,4]
-        # 使用标准的 2x2x2 下采样，这是 nnFormer 的默认策略
-        self.down_stride=[[2,2,2],[2,2,2],[2,2,2],[2,2,2]]
+        # 使用渐进式下采样策略
+        self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
         self.deep_supervision=False  # 【关键优化】：启用深度监督提升训练效果
-        
-        # 【新增】：使用标准的 pool_op_kernel_sizes
-        # 这是 nnFormer 的标准配置，确保完全兼容
-        self.net_num_pool_op_kernel_sizes = [
-            [2, 2, 2],  # Stage 1: 标准 2x2x2 下采样
-            [2, 2, 2],  # Stage 2: 标准 2x2x2 下采样
-            [2, 2, 2],  # Stage 3: 标准 2x2x2 下采样
-            [2, 2, 2]   # Stage 4: 标准 2x2x2 下采样
-        ]
-        
-        # 对应的卷积核尺寸
-        self.net_conv_kernel_sizes = [[3, 3, 3]] * (len(self.net_num_pool_op_kernel_sizes) + 1)
         
         # 【关键优化】：使用专门针对椎间盘分割优化的损失函数
         self.loss = DiscSegmentationLoss(num_classes=3, alpha=0.25, gamma=2.0, 
                                         dice_weight=1.0, focal_weight=0.5)
         
+    def process_plans(self, plans):
+        """
+        重写 process_plans 方法，设置适合 nnFormer 的 pool_op_kernel_sizes
+        基于你的 down_stride 配置 [[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
+        """
+        # 调用父类的 process_plans
+        super().process_plans(plans)
+        
+        # 【新增】：为 nnFormer 设置正确的 pool_op_kernel_sizes
+        # 基于你的 down_stride 配置计算合适的池化核尺寸
+        # 注意：pool_op_kernel_sizes 需要与 down_stride 匹配
+        self.net_num_pool_op_kernel_sizes = [
+            [1, 4, 4],   # Stage 1: 对应 down_stride[0] = [1,4,4]
+            [1, 8, 8],   # Stage 2: 对应 down_stride[1] = [1,8,8]  
+            [2, 16, 16], # Stage 3: 对应 down_stride[2] = [2,16,16]
+            [4, 32, 32]  # Stage 4: 对应 down_stride[3] = [4,32,32]
+        ]
+        
+        # 对应的卷积核尺寸
+        self.net_conv_kernel_sizes = [[3, 3, 3]] * (len(self.net_num_pool_op_kernel_sizes) + 1)
+        
+        self.print_to_log_file(f"Set pool_op_kernel_sizes: {self.net_num_pool_op_kernel_sizes}")
+        self.print_to_log_file(f"Set conv_kernel_sizes: {self.net_conv_kernel_sizes}")
+        self.print_to_log_file(f"Down stride: {self.down_stride}")
+
     def initialize(self, training=True, force_load_plans=False):
         """
         【简化版本】：移除所有数据增强相关代码，专注核心训练逻辑
