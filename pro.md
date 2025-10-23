@@ -1,3 +1,7 @@
+export nnFormer_raw_data_base="/root/DL-MRI-Lumbar-Disc-Degeneration/DATASET/nnFormer_raw"
+export nnFormer_preprocessed="/root/DL-MRI-Lumbar-Disc-Degeneration/DATASET/nnFormer_preprocessed"
+export RESULTS_FOLDER="/root/DL-MRI-Lumbar-Disc-Degeneration/DATASET/nnFormer_trained_models"
+
 #preprocessing
 nnFormer_convert_decathlon_task -i ./DATASET/nnFormer_raw/nnFormer_raw_data/Task01_disc
 nnFormer_plan_and_preprocess -t 1
