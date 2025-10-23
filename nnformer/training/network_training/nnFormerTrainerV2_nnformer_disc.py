@@ -119,44 +119,19 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.num_classes=self.plans['num_classes'] + 1
         self.conv_op=nn.Conv3d
         
+        
         self.embedding_dim=96
         self.depths=[2, 2, 2, 2]
         self.num_heads=[3, 6, 12, 24]
-        self.embedding_patch_size=[1,4,4]  # 保持原始patch size
+        self.embedding_patch_size=[1,4,4]
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
-        self.down_stride = [
-                [1, 2, 2],
-                [1, 2, 2],
-                [2, 4, 4],
-                [2, 4, 4]
-            ]
-        self.deep_supervision=False  # 【关键优化】：启用深度监督提升训练效果
+        self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
+        self.deep_supervision=False  
         
         # 【关键优化】：使用专门针对椎间盘分割优化的损失函数
         self.loss = DiscSegmentationLoss(num_classes=3, alpha=0.25, gamma=2.0, 
                                         dice_weight=1.0, focal_weight=0.5)
         
-    def process_plans(self, plans):
-        """
-        重写 process_plans 方法，设置适合 nnFormer 的 pool_op_kernel_sizes
-        基于你的 down_stride 配置 [[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
-        """
-        # 调用父类的 process_plans
-        super().process_plans(plans)
-        self.net_num_pool_op_kernel_sizes = [
-                [1, 2, 2],
-                [1, 2, 2],
-                [2, 4, 4],
-                [2, 4, 4]
-            ]
-        
-        # 对应的卷积核尺寸
-        self.net_conv_kernel_sizes = [[3, 3, 3]] * (len(self.net_num_pool_op_kernel_sizes) + 1)
-        
-        self.print_to_log_file(f"Set pool_op_kernel_sizes: {self.net_num_pool_op_kernel_sizes}")
-        self.print_to_log_file(f"Set conv_kernel_sizes: {self.net_conv_kernel_sizes}")
-        self.print_to_log_file(f"Down stride: {self.down_stride}")
-
     def initialize(self, training=True, force_load_plans=False):
         """
         【简化版本】：移除所有数据增强相关代码，专注核心训练逻辑
