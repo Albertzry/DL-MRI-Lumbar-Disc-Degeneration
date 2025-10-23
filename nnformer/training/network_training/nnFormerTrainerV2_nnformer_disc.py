@@ -31,7 +31,7 @@ from nnformer.training.network_training.nnFormerTrainer import nnFormerTrainer
 from nnformer.utilities.nd_softmax import softmax_helper
 from sklearn.model_selection import KFold
 from torch import nn
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from nnformer.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
 
@@ -299,6 +299,12 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
 
         # 在训练模式下应用腰椎间盘专用数据增强
         if do_backprop and self.use_disc_augmentation:
+            # 确保数据是numpy数组（增强器只处理numpy）
+            if isinstance(data, torch.Tensor):
+                data = data.cpu().numpy()
+            if isinstance(target, torch.Tensor):
+                target = target.cpu().numpy()
+            
             # 对batch中的每个样本应用增强
             batch_size = data.shape[0]
             for i in range(batch_size):
@@ -312,6 +318,18 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
                     sample_target, 
                     current_epoch=self.epoch
                 )
+                
+                # 🔧 修复标签：将所有负值（如-1从旋转边界）设为0（背景）
+                aug_target = np.clip(aug_target, 0, self.num_classes - 1)
+                
+                # 确保数据类型正确
+                aug_data = aug_data.astype(np.float32)
+                aug_target = aug_target.astype(np.float32)
+                
+                # 检查数据有效性
+                if not np.all(np.isfinite(aug_data)):
+                    # 如果有NaN/Inf，跳过增强
+                    continue
                 
                 # 更新batch中的样本
                 data[i] = aug_data
@@ -327,7 +345,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.optimizer.zero_grad()
 
         if self.fp16:
-            with autocast():
+            with autocast('cuda'):
                 output = self.network(data)
                 del data
                 

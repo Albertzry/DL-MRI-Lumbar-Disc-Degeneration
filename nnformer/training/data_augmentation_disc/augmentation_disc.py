@@ -180,7 +180,8 @@ class DataAugmentation3D_disc:
         
         angle = np.random.uniform(*self.rotation_angle_range)
         # 随机选择旋转平面
-        axes = np.random.choice([(0, 1), (0, 2), (1, 2)])
+        axes_options = [(0, 1), (0, 2), (1, 2)]
+        axes = axes_options[np.random.randint(0, 3)]
         
         augmented_data = np.zeros_like(data)
         for c in range(data.shape[0]):
@@ -200,7 +201,7 @@ class DataAugmentation3D_disc:
             return data, seg
         
         # 随机选择翻转轴（+1是因为通道维度在前）
-        axis = np.random.choice(self.mirror_axes) + 1
+        axis = self.mirror_axes[np.random.randint(0, len(self.mirror_axes))] + 1
         data = np.flip(data, axis=axis).copy()
         seg = np.flip(seg, axis=axis).copy()
         
