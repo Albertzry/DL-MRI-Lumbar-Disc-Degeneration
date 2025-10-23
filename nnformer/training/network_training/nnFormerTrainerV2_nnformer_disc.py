@@ -35,6 +35,9 @@ from torch.cuda.amp import autocast
 from nnformer.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
 
+# 导入腰椎间盘专用数据增强
+from nnformer.training.data_augmentation_disc import DataAugmentation3D_disc
+
 
     
 class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
@@ -72,6 +75,30 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
         self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
         self.deep_supervision=False
+        
+        # 初始化腰椎间盘专用数据增强器（概率随epoch线性衰减）
+        self.disc_augmentor = DataAugmentation3D_disc(
+            do_rotation=True,
+            rotation_angle_range=(-15, 15),      # 保守的旋转角度，保护脊柱结构
+            do_mirror=True,
+            mirror_axes=(0, 1, 2),                # 允许所有轴镜像
+            do_gamma=True,
+            gamma_range=(0.7, 1.5),
+            do_brightness=True,
+            brightness_range=(-0.2, 0.2),
+            do_contrast=True,
+            contrast_range=(0.75, 1.25),
+            do_noise=True,
+            noise_variance=(0, 0.05),
+            do_blur=True,
+            blur_sigma=(0.5, 1.5),
+            do_low_res=True,
+            low_res_scale=(0.5, 1.0),
+            initial_p=0.4,                        # 初始概率40%
+            final_p=0.05,                         # 最终概率5%
+            max_epochs=self.max_num_epochs        # 使用训练器的最大epoch数
+        )
+        self.use_disc_augmentation = True         # 是否启用腰椎间盘增强
     def initialize(self, training=True, force_load_plans=False):
         """
         - replaced get_default_augmentation with get_moreDA_augmentation
@@ -259,6 +286,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
     def run_iteration(self, data_generator, do_backprop=True, run_online_evaluation=False):
         """
         gradient clipping improves training stability
+        在此处应用腰椎间盘专用数据增强（概率随epoch衰减）
 
         :param data_generator:
         :param do_backprop:
@@ -268,6 +296,26 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         data_dict = next(data_generator)
         data = data_dict['data']
         target = data_dict['target']
+
+        # 在训练模式下应用腰椎间盘专用数据增强
+        if do_backprop and self.use_disc_augmentation:
+            # 对batch中的每个样本应用增强
+            batch_size = data.shape[0]
+            for i in range(batch_size):
+                # 提取单个样本 (C, Z, X, Y)
+                sample_data = data[i]
+                sample_target = target[i]
+                
+                # 应用增强（自动根据当前epoch调整概率）
+                aug_data, aug_target = self.disc_augmentor(
+                    sample_data, 
+                    sample_target, 
+                    current_epoch=self.epoch
+                )
+                
+                # 更新batch中的样本
+                data[i] = aug_data
+                target[i] = aug_target
 
         data = maybe_to_torch(data)
         target = maybe_to_torch(target)
@@ -597,10 +645,16 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
     def on_epoch_end(self):
         """
         overwrite patient-based early stopping. Always run to 1000 epochs
+        记录当前epoch的数据增强概率
         :return:
         """
         super().on_epoch_end()
         continue_training = self.epoch < self.max_num_epochs
+
+        # 记录当前数据增强概率
+        if self.use_disc_augmentation:
+            current_aug_prob = self.disc_augmentor.get_current_probability()
+            self.print_to_log_file(f"Disc augmentation probability at epoch {self.epoch}: {current_aug_prob:.4f}")
 
         # it can rarely happen that the momentum of nnUNetTrainerV2 is too high for some dataset. If at epoch 100 the
         # estimated validation Dice is still 0 then we reduce the momentum from 0.99 to 0.95

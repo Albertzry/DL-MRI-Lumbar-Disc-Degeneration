@@ -18,13 +18,82 @@ import pickle
 import SimpleITK as sitk
 import numpy as np
 import shutil
+import torch
+import torch.nn.functional as F
 from batchgenerators.utilities.file_and_folder_operations import *
 from multiprocessing import Pool
 from collections import OrderedDict
 
 # 预处理统一到固定体素网格后再做中心裁剪
-RESAMPLE_TARGET_SIZE = (512, 512, 85)  # ITK 顺序 (X, Y, Z)
-CENTER_CROP_SIZE = (85, 256, 216)      # numpy 顺序 (Z, X, Y) -> 物理尺寸 [216, 256, 85]
+RESAMPLE_TARGET_SIZE = (512, 512, 85)  
+CENTER_CROP_SIZE = (85, 256, 216)     
+
+
+def normalize_intensity(data, percentile_lower=0.5, percentile_upper=99.5):
+    """
+    Normalize image intensity using percentile-based clipping and z-score normalization.
+    Suitable for MRI images with varying intensity ranges.
+    
+    :param data: numpy array with shape (C, Z, X, Y)
+    :param percentile_lower: lower percentile for clipping
+    :param percentile_upper: upper percentile for clipping
+    :return: normalized data
+    """
+    normalized_data = np.zeros_like(data, dtype=np.float32)
+    for c in range(data.shape[0]):
+        channel_data = data[c]
+        # Use only non-zero voxels for computing statistics (exclude background)
+        non_zero_mask = channel_data > 0
+        if np.any(non_zero_mask):
+            non_zero_values = channel_data[non_zero_mask]
+            lower = np.percentile(non_zero_values, percentile_lower)
+            upper = np.percentile(non_zero_values, percentile_upper)
+            # Clip values
+            clipped = np.clip(channel_data, lower, upper)
+            # Z-score normalization on non-zero region
+            mean_val = np.mean(non_zero_values)
+            std_val = np.std(non_zero_values)
+            if std_val > 0:
+                normalized_data[c] = (clipped - mean_val) / std_val
+            else:
+                normalized_data[c] = clipped - mean_val
+        else:
+            normalized_data[c] = channel_data
+    return normalized_data
+
+
+def torch_interpolate_3d(data, target_size, mode='trilinear', is_seg=False):
+    """
+    Use PyTorch for 3D interpolation. Supports both image and segmentation.
+    
+    :param data: numpy array with shape (C, Z, X, Y)
+    :param target_size: tuple (Z, X, Y)
+    :param mode: interpolation mode ('trilinear' for images, 'nearest' for segmentation)
+    :param is_seg: whether this is segmentation data
+    :return: interpolated numpy array
+    """
+    if is_seg:
+        mode = 'nearest'
+    
+    # Convert to torch tensor
+    data_torch = torch.from_numpy(data).unsqueeze(0).float()  # (1, C, Z, X, Y)
+    
+    # Interpolate
+    target_size_tuple = tuple(int(i) for i in target_size)
+    interpolated = F.interpolate(
+        data_torch, 
+        size=target_size_tuple, 
+        mode=mode,
+        align_corners=False if mode == 'trilinear' else None
+    )
+    
+    # Convert back to numpy
+    result = interpolated.squeeze(0).numpy()
+    
+    if is_seg:
+        result = np.round(result).astype(np.int16)
+    
+    return result
 
 
 def create_nonzero_mask(data):
@@ -56,7 +125,16 @@ def crop_to_bbox(image, bbox):
 
 
 def resample_sitk_image_to_size(itk_image, target_size, is_seg=False):
-    """利用 SimpleITK 将影像重采样到目标大小。"""
+    """
+    [已废弃 - Deprecated] 利用 SimpleITK 将影像重采样到目标大小。
+    
+    此函数已被 PyTorch 的 torch_interpolate_3d 函数替代，保留仅为向后兼容。
+    新代码请使用 torch_interpolate_3d 进行三维插值重采样。
+    
+    This function is deprecated. Please use torch_interpolate_3d for PyTorch-based 
+    3D interpolation which provides GPU acceleration and consistency with the 
+    augmentation pipeline.
+    """
     target_size = tuple(int(i) for i in target_size)
     original_size = itk_image.GetSize()
     original_spacing = itk_image.GetSpacing()
@@ -144,7 +222,7 @@ def get_case_identifier_from_npz(case):
 
 
 def load_case_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE_TARGET_SIZE):
-    """读取一例病例，按需重采样到统一体素网格。"""
+    """读取一例病例，按需重采样到统一体素网格（使用PyTorch插值）。"""
     assert isinstance(data_files, (list, tuple)), "case must be either a list or a tuple"
     properties = OrderedDict()
     data_itk = [sitk.ReadImage(f) for f in data_files]
@@ -159,21 +237,39 @@ def load_case_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE
     properties["itk_spacing"] = data_itk[0].GetSpacing()
     properties["itk_direction"] = data_itk[0].GetDirection()
 
-    if target_size is not None:
-        data_itk = [resample_sitk_image_to_size(d, target_size, is_seg=False) for d in data_itk]
-        if seg_itk is not None:
-            seg_itk = resample_sitk_image_to_size(seg_itk, target_size, is_seg=True)
-        properties["size_after_resample"] = np.array(target_size)[[2, 1, 0]]
-        properties["spacing_after_resample"] = np.array(data_itk[0].GetSpacing())[[2, 1, 0]]
-    else:
-        properties["size_after_resample"] = properties["original_size_of_raw_data"]
-        properties["spacing_after_resample"] = properties["original_spacing"]
-
+    # 先转换为numpy数组
     data_npy = np.vstack([sitk.GetArrayFromImage(d)[None] for d in data_itk]).astype(np.float32)
     if seg_itk is not None:
         seg_npy = sitk.GetArrayFromImage(seg_itk)[None].astype(np.float32)
     else:
         seg_npy = None
+
+    # 使用PyTorch进行插值重采样
+    if target_size is not None:
+        original_size = data_itk[0].GetSize()  # (X, Y, Z)
+        original_spacing = data_itk[0].GetSpacing()  # (X, Y, Z)
+        
+        # target_size是(X, Y, Z)格式，需要转换为(Z, X, Y)用于torch_interpolate_3d
+        target_size_zxy = (target_size[2], target_size[0], target_size[1])
+        
+        # 使用PyTorch插值
+        data_npy = torch_interpolate_3d(data_npy, target_size_zxy, mode='trilinear', is_seg=False)
+        if seg_npy is not None:
+            seg_npy = torch_interpolate_3d(seg_npy, target_size_zxy, mode='nearest', is_seg=True)
+        
+        # 计算新的spacing
+        target_spacing = tuple(
+            original_spacing[i] * (original_size[i] / float(target_size[i])) for i in range(3)
+        )
+        
+        properties["size_after_resample"] = np.array(target_size)[[2, 1, 0]]
+        properties["spacing_after_resample"] = np.array(target_spacing)[[2, 1, 0]]
+        properties["interpolation_method"] = "pytorch_trilinear"
+    else:
+        properties["size_after_resample"] = properties["original_size_of_raw_data"]
+        properties["spacing_after_resample"] = properties["original_spacing"]
+        properties["interpolation_method"] = "none"
+    
     return data_npy, seg_npy, properties
 
 
@@ -217,28 +313,47 @@ def get_patient_identifiers_from_cropped_files(folder):
 
 
 class ImageCropper(object):
-    def __init__(self, num_threads, output_folder=None, target_size=RESAMPLE_TARGET_SIZE):
+    def __init__(self, num_threads, output_folder=None, target_size=RESAMPLE_TARGET_SIZE, 
+                 apply_normalization=True):
         """
-        按需重采样 + 中心裁剪，保持与原有调用兼容。
+        按需重采样 + 中心裁剪 + 归一化，保持与原有调用兼容。
         :param num_threads: 预处理使用的线程数
         :param output_folder: 结果输出目录
         :param target_size: 重采样目标体素数 (X, Y, Z)
+        :param apply_normalization: 是否在预处理时应用强度归一化（推荐为True）
         """
         self.output_folder = output_folder
         self.num_threads = num_threads
         self.target_size = target_size
+        self.apply_normalization = apply_normalization
 
         if self.output_folder is not None:
             maybe_mkdir_p(self.output_folder)
 
     @staticmethod
-    def crop(data, properties, seg=None):
+    def crop(data, properties, seg=None, apply_normalization=True):
+        """
+        裁剪并可选地归一化数据。
+        :param data: 图像数据 (C, Z, X, Y)
+        :param properties: 属性字典
+        :param seg: 分割标签 (C, Z, X, Y)
+        :param apply_normalization: 是否应用强度归一化
+        :return: 处理后的数据、分割和属性
+        """
         shape_before = data.shape
         data, seg, bbox = center_crop_to_size(data, seg, target_size=CENTER_CROP_SIZE, nonzero_label=-1)
         shape_after = data.shape
         spacing_to_show = properties.get("spacing_after_resample", properties.get("original_spacing"))
         print("before crop:", shape_before, "after crop:", shape_after, "spacing:",
               np.array(spacing_to_show), "\n")
+
+        # 应用归一化（在裁剪之后）
+        if apply_normalization:
+            print("  Applying intensity normalization...")
+            data = normalize_intensity(data, percentile_lower=0.5, percentile_upper=99.5)
+            properties["normalization_applied"] = True
+        else:
+            properties["normalization_applied"] = False
 
         properties["crop_bbox"] = bbox
         if seg is not None:
@@ -250,9 +365,9 @@ class ImageCropper(object):
         return data, seg, properties
 
     @staticmethod
-    def crop_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE_TARGET_SIZE):
+    def crop_from_list_of_files(data_files, seg_file=None, target_size=RESAMPLE_TARGET_SIZE, apply_normalization=True):
         data, seg, properties = load_case_from_list_of_files(data_files, seg_file, target_size=target_size)
-        return ImageCropper.crop(data, properties, seg)
+        return ImageCropper.crop(data, properties, seg, apply_normalization=apply_normalization)
 
     def load_crop_save(self, case, case_identifier, overwrite_existing=False):
         try:
@@ -265,6 +380,7 @@ class ImageCropper(object):
                     case[:-1],
                     case[-1],
                     target_size=self.target_size,
+                    apply_normalization=self.apply_normalization,
                 )
 
                 all_data = np.vstack((data, seg))
