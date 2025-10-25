@@ -38,6 +38,9 @@ from batchgenerators.utilities.file_and_folder_operations import *
 # 导入腰椎间盘专用数据增强
 from nnformer.training.data_augmentation_disc import DataAugmentation3D_disc
 
+# 导入 Focal Loss
+from nnformer.training.loss_functions.focal_loss import DC_and_Focal_loss
+
 
     
 class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
@@ -55,6 +58,18 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.ds_loss_weights = None
         self.pin_memory = True
         self.load_pretrain_weight=True
+        
+        # 🔥 使用 Dice + Focal Loss 替代 Dice + CE Loss
+        # Focal Loss 参数：
+        # - alpha: 类别权重，None 表示所有类别权重相同（可根据类别分布调整）
+        # - gamma: 聚焦参数，2.0 是标准值，增大会更关注难分样本
+        # - reduction: 'mean' 表示对所有像素取平均
+        self.loss = DC_and_Focal_loss(
+            soft_dice_kwargs={'batch_dice': self.batch_dice, 'smooth': 1e-5, 'do_bg': False},
+            focal_kwargs={'alpha': None, 'gamma': 2.0, 'reduction': 'mean'},
+            weight_dice=1.0,    # Dice Loss 权重
+            weight_focal=1.0    # Focal Loss 权重
+        )
         
         self.load_plans_file()    
         
