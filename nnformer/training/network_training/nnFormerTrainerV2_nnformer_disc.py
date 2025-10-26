@@ -89,7 +89,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.embedding_patch_size=[1,4,4]
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
         self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
-        self.deep_supervision=False
+        self.deep_supervision=True
         
         # 初始化腰椎间盘专用数据增强器（概率随epoch线性衰减）
         self.disc_augmentor = DataAugmentation3D_disc(
@@ -109,7 +109,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
             blur_sigma=(0.5, 1.5),
             do_low_res=True,
             low_res_scale=(0.5, 1.0),
-            initial_p=0.4,                        # 初始概率40%
+            initial_p=0.2,                        # 初始概率40%
             final_p=0.05,                         # 最终概率5%
             max_epochs=self.max_num_epochs        # 使用训练器的最大epoch数
         )
