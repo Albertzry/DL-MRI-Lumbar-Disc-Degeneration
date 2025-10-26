@@ -53,7 +53,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         super().__init__(plans_file, fold, output_folder, dataset_directory, batch_dice, stage, unpack_data,
                          deterministic, fp16)
         self.max_num_epochs = 1000
-        self.initial_lr = 1e-2
+        self.initial_lr = 5e-3
         self.deep_supervision_scales = None
         self.ds_loss_weights = None
         self.pin_memory = True
@@ -66,7 +66,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         # - reduction: 'mean' 表示对所有像素取平均
         self.loss = DC_and_Focal_loss(
             soft_dice_kwargs={'batch_dice': self.batch_dice, 'smooth': 1e-5, 'do_bg': False},
-            focal_kwargs={'alpha': None, 'gamma': 2.0, 'reduction': 'mean'},
+            focal_kwargs={'alpha': [0.25, 1, 1], 'gamma': 2.0, 'reduction': 'mean'},
             weight_dice=1.0,    # Dice Loss 权重
             weight_focal=1.0    # Focal Loss 权重
         )
@@ -278,7 +278,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
     def predict_preprocessed_data_return_seg_and_softmax(self, data: np.ndarray, do_mirroring: bool = True,
                                                          mirror_axes: Tuple[int] = None,
                                                          use_sliding_window: bool = True, step_size: float = 0.5,
-                                                         use_gaussian: bool = True, pad_border_mode: str = 'constant',
+                                                         use_gaussian: bool = True, pad_border_mode: str = 'edge',
                                                          pad_kwargs: dict = None, all_in_gpu: bool = False,
                                                          verbose: bool = True, mixed_precision=True) -> Tuple[np.ndarray, np.ndarray]:
         """
