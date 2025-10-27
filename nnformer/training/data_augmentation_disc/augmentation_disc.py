@@ -200,10 +200,32 @@ class DataAugmentation3D_disc:
         if not self.do_mirror or np.random.rand() >= self.current_p:
             return data, seg
         
+        # 添加形状检查和防御性编程
+        if len(data.shape) < 4 or len(seg.shape) < 4:
+            print(f"Warning: Unexpected shape in mirror augmentation. data: {data.shape}, seg: {seg.shape}")
+            return data, seg
+        
         # 随机选择翻转轴（+1是因为通道维度在前）
-        axis = self.mirror_axes[np.random.randint(0, len(self.mirror_axes))] + 1
-        data = np.flip(data, axis=axis).copy()
-        seg = np.flip(seg, axis=axis).copy()
+        axis_idx = np.random.randint(0, len(self.mirror_axes))
+        axis = self.mirror_axes[axis_idx] + 1
+        
+        # 确保 axis 在有效范围内
+        if axis >= len(data.shape) or axis >= len(seg.shape):
+            print(f"Warning: axis {axis} out of range for shapes data: {data.shape}, seg: {seg.shape}")
+            return data, seg
+        
+        # 确保该轴的维度大于0
+        if data.shape[axis] == 0 or seg.shape[axis] == 0:
+            print(f"Warning: Cannot flip along axis {axis}, dimension is 0")
+            return data, seg
+        
+        try:
+            data = np.flip(data, axis=axis).copy()
+            seg = np.flip(seg, axis=axis).copy()
+        except (ValueError, IndexError) as e:
+            print(f"Warning: Mirror augmentation failed with error: {e}")
+            print(f"  data.shape: {data.shape}, seg.shape: {seg.shape}, axis: {axis}")
+            return data, seg
         
         return data, seg
     

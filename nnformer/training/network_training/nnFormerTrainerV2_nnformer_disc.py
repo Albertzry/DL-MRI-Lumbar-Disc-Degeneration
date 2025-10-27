@@ -31,7 +31,7 @@ from nnformer.training.network_training.nnFormerTrainer import nnFormerTrainer
 from nnformer.utilities.nd_softmax import softmax_helper
 from sklearn.model_selection import KFold
 from torch import nn
-from torch.amp import autocast
+from torch.cuda.amp import autocast
 from nnformer.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
 
@@ -146,7 +146,6 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
                 #mask = np.array([True] + [True if i < net_numpool - 1 else False for i in range(1, net_numpool)])
                 #weights[~mask] = 0
                 weights = weights / weights.sum()
-                print(weights)
                 self.ds_loss_weights = weights
                 # now wrap the loss
                 self.loss = MultipleOutputLoss2(self.loss, self.ds_loss_weights)
@@ -158,11 +157,11 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
             if training:
                 self.dl_tr, self.dl_val = self.get_basic_generators()
                 if self.unpack_data:
-                    print("unpacking dataset")
+                    self.print_to_log_file("unpacking dataset")
                     unpack_dataset(self.folder_with_preprocessed_data)
-                    print("done")
+                    self.print_to_log_file("done")
                 else:
-                    print(
+                    self.print_to_log_file(
                         "INFO: Not unpacking data! Training may be slow due to that. Pray you are not using 2d or you "
                         "will wait all winter for your model to finish!")
 
@@ -314,18 +313,29 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
 
         # 在训练模式下应用腰椎间盘专用数据增强
         if do_backprop and self.use_disc_augmentation:
+            # 检测是否使用deep supervision（target是列表）
+            is_deep_supervision = isinstance(target, (list, tuple))
+            
             # 确保数据是numpy数组（增强器只处理numpy）
             if isinstance(data, torch.Tensor):
                 data = data.cpu().numpy()
-            if isinstance(target, torch.Tensor):
-                target = target.cpu().numpy()
+            
+            # 如果是deep supervision，只处理全分辨率的target（列表第一个元素）
+            if is_deep_supervision:
+                target_for_aug = target[0]  # 全分辨率的target
+                if isinstance(target_for_aug, torch.Tensor):
+                    target_for_aug = target_for_aug.cpu().numpy()
+            else:
+                target_for_aug = target
+                if isinstance(target_for_aug, torch.Tensor):
+                    target_for_aug = target_for_aug.cpu().numpy()
             
             # 对batch中的每个样本应用增强
             batch_size = data.shape[0]
             for i in range(batch_size):
                 # 提取单个样本 (C, Z, X, Y)
                 sample_data = data[i]
-                sample_target = target[i]
+                sample_target = target_for_aug[i]
                 
                 # 应用增强（自动根据当前epoch调整概率）
                 aug_data, aug_target = self.disc_augmentor(
@@ -348,7 +358,16 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
                 
                 # 更新batch中的样本
                 data[i] = aug_data
-                target[i] = aug_target
+                target_for_aug[i] = aug_target
+            
+            # 如果是deep supervision，需要重新生成多分辨率的target
+            if is_deep_supervision:
+                from nnformer.training.data_augmentation.downsampling import downsample_seg_for_ds_transform2
+                # 重新计算多分辨率target
+                target = downsample_seg_for_ds_transform2(target_for_aug, self.deep_supervision_scales, 
+                                                         order=0, cval=0, axes=None)
+            else:
+                target = target_for_aug
 
         data = maybe_to_torch(data)
         target = maybe_to_torch(target)
@@ -360,7 +379,7 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.optimizer.zero_grad()
 
         if self.fp16:
-            with autocast('cuda'):
+            with autocast():
                 output = self.network(data)
                 del data
                 
