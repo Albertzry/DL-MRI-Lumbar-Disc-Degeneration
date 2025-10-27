@@ -66,9 +66,9 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         # - reduction: 'mean' 表示对所有像素取平均
         self.loss = DC_and_Focal_loss(
             soft_dice_kwargs={'batch_dice': self.batch_dice, 'smooth': 1e-5, 'do_bg': False},
-            focal_kwargs={'alpha': [0.25, 1, 1], 'gamma': 4.0, 'reduction': 'mean'},
-            weight_dice=1.0,    # Dice Loss 权重
-            weight_focal=1.0    # Focal Loss 权重
+            focal_kwargs={'alpha': [0.25, 1, 1], 'gamma': 2.0, 'reduction': 'mean'},
+            weight_dice=2.0,    # Dice Loss 权重
+            weight_focal=0.5    # Focal Loss 权重
         )
         
         self.load_plans_file()    
@@ -83,13 +83,13 @@ class nnFormerTrainerV2_nnformer_disc(nnFormerTrainer):
         self.num_classes=self.plans['num_classes'] + 1
         self.conv_op=nn.Conv3d
         
-        self.embedding_dim=96
+        self.embedding_dim=128
         self.depths=[2, 2, 2, 2]
-        self.num_heads=[3, 6, 12, 24]
+        self.num_heads=[4, 8, 16, 32]
         self.embedding_patch_size=[1,4,4]
         self.window_size=[[3,5,5],[3,5,5],[7,10,10],[3,5,5]]
         self.down_stride=[[1,4,4],[1,8,8],[2,16,16],[4,32,32]]
-        self.deep_supervision=False
+        self.deep_supervision=True
         
         # 初始化腰椎间盘专用数据增强器（概率随epoch线性衰减）
         self.disc_augmentor = DataAugmentation3D_disc(
